@@ -1,0 +1,11 @@
+# Shared web recon profile
+
+scan web gobuster {
+  target ${web_target}
+  args dir -w ${wordlist} -t 50 --no-status
+} -> web_dirs
+
+script checklist {
+  run python
+  args -c "${python_stmt}"
+} -> checklist_log

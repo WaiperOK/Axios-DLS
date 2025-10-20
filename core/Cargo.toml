@@ -1,0 +1,15 @@
+[package]
+name = "axion-core"
+version = "0.0.1"
+edition = "2021"
+description = "Core library for Axion DSL runtime and language services."
+license = "Apache-2.0"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+shell-words = { workspace = true }
+quick-xml = { workspace = true }
+time = { workspace = true }
+comfy-table = { workspace = true }

@@ -1,0 +1,11 @@
+#!/usr/bin/env axion
+
+# Axion DSL hello-world scenario
+
+group hello {
+  note "Hello, world!"
+}
+
+report stdout {
+  include asset_group:hello
+}

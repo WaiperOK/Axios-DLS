@@ -1,0 +1,25 @@
+# Axion DSL demo scenario (service discovery)
+
+let corp_cidr = 10.0.0.0/24
+let corp_host = http://10.0.0.10
+let common_wordlist = wordlists/common.txt
+
+group corp {
+  cidr ${corp_cidr}
+  note Corporate lab segment used in the MVP demo
+}
+
+scan corp nmap {
+  target ${corp_cidr}
+  flags -sV -Pn
+} -> corp_findings
+
+script gobuster_web {
+  run gobuster
+  args dir -u ${corp_host} -w ${common_wordlist} -t 50
+} -> corp_dirs
+
+report stdout {
+  include corp_findings
+  include corp_dirs
+}

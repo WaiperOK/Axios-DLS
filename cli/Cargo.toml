@@ -1,0 +1,13 @@
+[package]
+name = "axion-cli"
+version = "0.0.1"
+edition = "2021"
+description = "CLI entrypoint for Axion DSL."
+license = "Apache-2.0"
+
+[dependencies]
+anyhow = { workspace = true }
+axion-core = { path = "../core" }
+clap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
