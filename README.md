@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="axios.png" alt="Axios DSL Logo" width="200">
+</p>
+
 # Axios DSL
 
 Axios DSL is a domain-specific language and execution environment for modelling offensive security campaigns, repeatable attack simulations, and operational resilience drills. The project couples a compact declarative syntax with an extensible runtime capable of orchestrating external scanners, scripted tooling, and analytic post-processing.
