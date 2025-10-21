@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use serde_json::Value as JsonValue;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
@@ -55,7 +56,16 @@ pub struct ReportStep {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VariableDecl {
     pub name: String,
-    pub value: String,
+    pub value: LiteralValue,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum LiteralValue {
+    String(String),
+    Number(f64),
+    Boolean(bool),
+    Array(Vec<LiteralValue>),
+    Object(BTreeMap<String, LiteralValue>),
 }
 
 #[derive(Debug, Clone, thiserror::Error)]
@@ -221,7 +231,7 @@ fn parse_variable(line: &str) -> Result<VariableDecl, ParseError> {
         return Err(ParseError::InvalidSyntax(name.to_string()));
     }
 
-    let value = parse_quoted(value_part)?;
+    let value = parse_literal(value_part)?;
 
     Ok(VariableDecl {
         name: name.to_string(),
@@ -400,6 +410,13 @@ fn parse_quoted(value: &str) -> Result<String, ParseError> {
         return Ok(stripped.to_string());
     }
 
+    if let Some(stripped) = trimmed
+        .strip_prefix('\'')
+        .and_then(|v| v.strip_suffix('\''))
+    {
+        return Ok(stripped.to_string());
+    }
+
     if trimmed.starts_with('"') || trimmed.ends_with('"') {
         return Err(ParseError::InvalidSyntax(value.to_string()));
     }
@@ -423,6 +440,219 @@ where
         }
     }
     None
+}
+
+pub fn parse_literal_expression(value: &str) -> Result<LiteralValue, ParseError> {
+    parse_literal(value)
+}
+
+fn parse_literal(value: &str) -> Result<LiteralValue, ParseError> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Ok(LiteralValue::String(String::new()));
+    }
+
+    if trimmed.starts_with('[') {
+        return parse_array_literal(trimmed);
+    }
+    if trimmed.starts_with('{') {
+        return parse_object_literal(trimmed);
+    }
+    if trimmed.eq("true") {
+        return Ok(LiteralValue::Boolean(true));
+    }
+    if trimmed.eq("false") {
+        return Ok(LiteralValue::Boolean(false));
+    }
+    if let Some(num) = parse_number_literal(trimmed) {
+        return Ok(LiteralValue::Number(num));
+    }
+    if let Some(stripped) = trimmed
+        .strip_prefix('"')
+        .and_then(|v| v.strip_suffix('"'))
+        .or_else(|| {
+            trimmed
+                .strip_prefix('\'')
+                .and_then(|v| v.strip_suffix('\''))
+        })
+    {
+        return Ok(LiteralValue::String(stripped.to_string()));
+    }
+
+    Ok(LiteralValue::String(trimmed.to_string()))
+}
+
+fn parse_array_literal(value: &str) -> Result<LiteralValue, ParseError> {
+    if !value.ends_with(']') {
+        return Err(ParseError::InvalidSyntax(value.to_string()));
+    }
+    let inner = &value[1..value.len() - 1];
+    let mut items = Vec::new();
+    for item in split_top_level(inner, ',')? {
+        let trimmed = item.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        items.push(parse_literal(trimmed)?);
+    }
+    Ok(LiteralValue::Array(items))
+}
+
+fn parse_object_literal(value: &str) -> Result<LiteralValue, ParseError> {
+    if !value.ends_with('}') {
+        return Err(ParseError::InvalidSyntax(value.to_string()));
+    }
+    let inner = &value[1..value.len() - 1];
+    let mut map = BTreeMap::new();
+    for entry in split_top_level(inner, ',')? {
+        let trimmed = entry.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let (raw_key, raw_value) = split_key_value(trimmed)?;
+        let key = parse_object_key(raw_key)?;
+        let value = parse_literal(raw_value)?;
+        map.insert(key, value);
+    }
+    Ok(LiteralValue::Object(map))
+}
+
+fn parse_number_literal(value: &str) -> Option<f64> {
+    if value
+        .chars()
+        .all(|c| c.is_ascii_digit() || matches!(c, '.' | '-' | '+'))
+    {
+        if let Ok(number) = value.parse::<f64>() {
+            return Some(number);
+        }
+    }
+    None
+}
+
+fn split_top_level(input: &str, delimiter: char) -> Result<Vec<&str>, ParseError> {
+    let mut items = Vec::new();
+    let mut depth = 0i32;
+    let mut in_quote: Option<char> = None;
+    let mut start = 0usize;
+    let chars: Vec<char> = input.chars().collect();
+    let mut idx = 0usize;
+    while idx < chars.len() {
+        let c = chars[idx];
+        if let Some(q) = in_quote {
+            if c == '\\' {
+                idx += 1;
+            } else if c == q {
+                in_quote = None;
+            }
+        } else {
+            match c {
+                '"' | '\'' => in_quote = Some(c),
+                '[' | '{' => depth += 1,
+                ']' | '}' => {
+                    depth -= 1;
+                    if depth < 0 {
+                        return Err(ParseError::InvalidSyntax(input.to_string()));
+                    }
+                }
+                _ if c == delimiter && depth == 0 => {
+                    items.push(input[start..idx].trim());
+                    start = idx + 1;
+                }
+                _ => {}
+            }
+        }
+        idx += 1;
+    }
+    if depth != 0 || in_quote.is_some() {
+        return Err(ParseError::InvalidSyntax(input.to_string()));
+    }
+    if start < input.len() {
+        items.push(input[start..].trim());
+    }
+    Ok(items.into_iter().filter(|s| !s.is_empty()).collect())
+}
+
+fn split_key_value(entry: &str) -> Result<(&str, &str), ParseError> {
+    let mut depth = 0i32;
+    let mut in_quote: Option<char> = None;
+    let chars: Vec<char> = entry.chars().collect();
+    for (idx, c) in chars.iter().enumerate() {
+        if let Some(q) = in_quote {
+            if *c == '\\' {
+                continue;
+            }
+            if *c == q {
+                in_quote = None;
+            }
+            continue;
+        }
+        match c {
+            '"' | '\'' => in_quote = Some(*c),
+            '[' | '{' => depth += 1,
+            ']' | '}' => depth -= 1,
+            ':' if depth == 0 => {
+                let key = entry[..idx].trim();
+                let value = entry[idx + 1..].trim();
+                return Ok((key, value));
+            }
+            _ => {}
+        }
+    }
+    Err(ParseError::InvalidSyntax(entry.to_string()))
+}
+
+fn parse_object_key(raw: &str) -> Result<String, ParseError> {
+    if let Some(stripped) = raw.strip_prefix('"').and_then(|v| v.strip_suffix('"')) {
+        return Ok(stripped.to_string());
+    }
+    if let Some(stripped) = raw.strip_prefix('\'').and_then(|v| v.strip_suffix('\'')) {
+        return Ok(stripped.to_string());
+    }
+    if raw.is_empty() || !raw.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        return Err(ParseError::InvalidSyntax(raw.to_string()));
+    }
+    Ok(raw.to_string())
+}
+
+impl LiteralValue {
+    pub fn to_json(&self) -> JsonValue {
+        match self {
+            LiteralValue::String(s) => JsonValue::String(s.clone()),
+            LiteralValue::Number(n) => JsonValue::from(*n),
+            LiteralValue::Boolean(b) => JsonValue::Bool(*b),
+            LiteralValue::Array(items) => {
+                JsonValue::Array(items.iter().map(|v| v.to_json()).collect())
+            }
+            LiteralValue::Object(map) => {
+                let mut obj = serde_json::Map::new();
+                for (k, v) in map {
+                    obj.insert(k.clone(), v.to_json());
+                }
+                JsonValue::Object(obj)
+            }
+        }
+    }
+
+    pub fn display(&self) -> String {
+        match self {
+            LiteralValue::String(s) => s.clone(),
+            LiteralValue::Number(n) => {
+                if (n.fract() - 0.0).abs() < f64::EPSILON {
+                    format!("{:.0}", n)
+                } else {
+                    n.to_string()
+                }
+            }
+            LiteralValue::Boolean(b) => b.to_string(),
+            LiteralValue::Array(_) | LiteralValue::Object(_) => self.to_json().to_string(),
+        }
+    }
+}
+
+impl fmt::Display for LiteralValue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.display())
+    }
 }
 
 impl Scenario {
@@ -534,7 +764,7 @@ pub struct ReportSummary {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VariableSummary {
     pub name: String,
-    pub value: String,
+    pub value: LiteralValue,
 }
 
 impl fmt::Display for ScenarioSummary {

@@ -34,9 +34,10 @@ EOF
 
 1. **Shebang** — Allows the scenario to be executed directly on Unix systems.
 2. **Variable** (`let greeting = ...`) — Demonstrates interpolation inside an asset group property.
-3. **Asset Group** (`asset_group demo_hosts`) - Documents the scope in which the scenario operates. Properties are expressed as whitespace-delimited key and value.
-4. **Scan** (`scan banner nmap`) - Invokes `nmap -sn 192.0.2.10`. The closing `-> banner_scan` alias renames the resulting artifact.
-5. **Report** — Emits a JSON payload (and optional ASCII table) to standard output that includes `banner_scan`.
+3. **Typed literals** � `let` now accepts numbers, booleans, arrays, and maps (e.g., `let targets = ["10.0.0.1", "10.0.0.2"]`, `let metadata = { owner: "blue", priority: 2 }`). Values remain available for interpolation inside strings and parameters.
+4. **Asset Group** (`asset_group demo_hosts`) - Documents the scope in which the scenario operates. Properties are expressed as whitespace-delimited key and value.
+5. **Scan** (`scan banner nmap`) - Invokes `nmap -sn 192.0.2.10`. The closing `-> banner_scan` alias renames the resulting artifact.
+6. **Report** — Emits a JSON payload (and optional ASCII table) to standard output that includes `banner_scan`.
 
 ## Execution
 

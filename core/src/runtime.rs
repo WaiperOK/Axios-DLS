@@ -2,7 +2,9 @@ use crate::artifact::{
     ArtifactKind, Asset, AssetGroupArtifact, Finding, ReportArtifact, ScanArtifacts,
     ScriptArtifact, StoredArtifact, TableArtifact,
 };
-use crate::{AssetGroupStep, ReportStep, ScanStep, Scenario, ScriptStep, Step, VariableDecl};
+use crate::{
+    AssetGroupStep, LiteralValue, ReportStep, ScanStep, Scenario, ScriptStep, Step, VariableDecl,
+};
 use comfy_table::{presets::ASCII_FULL, Table};
 use quick_xml::events::Event;
 use quick_xml::name::QName;
@@ -40,11 +42,11 @@ impl Executor {
     pub fn execute_with_vars(
         &self,
         scenario: &Scenario,
-        overrides: &HashMap<String, String>,
+        overrides: &HashMap<String, LiteralValue>,
     ) -> ExecutionOutcome {
         let mut steps = Vec::new();
         let mut store: HashMap<String, StoredArtifact> = HashMap::new();
-        let mut variables: HashMap<String, String> = overrides.clone();
+        let mut variables: HashMap<String, LiteralValue> = overrides.clone();
 
         for step in &scenario.steps {
             if matches!(step, Step::Import(_)) {
@@ -197,7 +199,7 @@ impl Executor {
     fn process_script(
         &self,
         script: &ScriptStep,
-        variables: &HashMap<String, String>,
+        variables: &HashMap<String, LiteralValue>,
     ) -> StepOutcome {
         let params = match resolve_map(&script.params, variables) {
             Ok(map) => map,
@@ -334,11 +336,11 @@ impl Executor {
     fn process_variable(
         &self,
         variable: &VariableDecl,
-        overrides: &HashMap<String, String>,
-        variables: &mut HashMap<String, String>,
+        overrides: &HashMap<String, LiteralValue>,
+        variables: &mut HashMap<String, LiteralValue>,
     ) -> StepOutcome {
         let (resolved, note) = if let Some(raw) = overrides.get(&variable.name) {
-            match substitute_variables(raw, variables) {
+            match resolve_literal_value(raw, variables) {
                 Ok(value) => (value, Some("(override)")),
                 Err(err) => {
                     return StepOutcome::from_execution(StepExecution::failed(
@@ -349,7 +351,7 @@ impl Executor {
                 }
             }
         } else {
-            match substitute_variables(&variable.value, variables) {
+            match resolve_literal_value(&variable.value, variables) {
                 Ok(value) => (value, None),
                 Err(err) => {
                     return StepOutcome::from_execution(StepExecution::failed(
@@ -363,20 +365,22 @@ impl Executor {
 
         variables.insert(variable.name.clone(), resolved.clone());
 
+        let message = match note {
+            Some(tag) => format!("{} = {} {}", variable.name, resolved.display(), tag),
+            None => format!("{} = {}", variable.name, resolved.display()),
+        };
+
         StepOutcome::from_execution(StepExecution::completed(
             variable.name.clone(),
             StepKind::Variable,
-            Some(match note {
-                Some(tag) => format!("{} = {} {}", variable.name, resolved, tag),
-                None => format!("{} = {}", variable.name, resolved),
-            }),
+            Some(message),
         ))
     }
 
     fn process_asset_group(
         &self,
         group: &AssetGroupStep,
-        variables: &HashMap<String, String>,
+        variables: &HashMap<String, LiteralValue>,
     ) -> StepOutcome {
         let resolved = match resolve_map(&group.properties, variables) {
             Ok(map) => map,
@@ -410,7 +414,11 @@ impl Executor {
         )
     }
 
-    fn process_scan(&self, scan: &ScanStep, variables: &HashMap<String, String>) -> StepOutcome {
+    fn process_scan(
+        &self,
+        scan: &ScanStep,
+        variables: &HashMap<String, LiteralValue>,
+    ) -> StepOutcome {
         let params = match resolve_map(&scan.params, variables) {
             Ok(map) => map,
             Err(err) => {
@@ -528,7 +536,7 @@ impl Executor {
         &self,
         report: &ReportStep,
         store: &HashMap<String, StoredArtifact>,
-        variables: &HashMap<String, String>,
+        variables: &HashMap<String, LiteralValue>,
     ) -> StepOutcome {
         let include_names = match resolve_list(&report.includes, variables) {
             Ok(list) => list,
@@ -788,6 +796,38 @@ fn truncate_output(bytes: &[u8]) -> String {
     }
 }
 
+fn resolve_literal_value(
+    value: &LiteralValue,
+    variables: &HashMap<String, LiteralValue>,
+) -> Result<LiteralValue, String> {
+    match value {
+        LiteralValue::String(s) => {
+            let substituted = substitute_variables(s, variables)?;
+            Ok(LiteralValue::String(substituted))
+        }
+        LiteralValue::Number(n) => Ok(LiteralValue::Number(*n)),
+        LiteralValue::Boolean(b) => Ok(LiteralValue::Boolean(*b)),
+        LiteralValue::Array(items) => {
+            let mut resolved = Vec::with_capacity(items.len());
+            for item in items {
+                resolved.push(resolve_literal_value(item, variables)?);
+            }
+            Ok(LiteralValue::Array(resolved))
+        }
+        LiteralValue::Object(map) => {
+            let mut resolved = BTreeMap::new();
+            for (k, v) in map {
+                resolved.insert(k.clone(), resolve_literal_value(v, variables)?);
+            }
+            Ok(LiteralValue::Object(resolved))
+        }
+    }
+}
+
+fn literal_to_string(value: &LiteralValue) -> String {
+    value.display()
+}
+
 fn sanitize_label(label: &str) -> String {
     label
         .chars()
@@ -803,7 +843,7 @@ fn sanitize_label(label: &str) -> String {
 
 fn resolve_map(
     source: &BTreeMap<String, String>,
-    variables: &HashMap<String, String>,
+    variables: &HashMap<String, LiteralValue>,
 ) -> Result<BTreeMap<String, String>, String> {
     let mut resolved = BTreeMap::new();
     for (key, value) in source {
@@ -815,7 +855,7 @@ fn resolve_map(
 
 fn resolve_list(
     items: &[String],
-    variables: &HashMap<String, String>,
+    variables: &HashMap<String, LiteralValue>,
 ) -> Result<Vec<String>, String> {
     let mut resolved = Vec::with_capacity(items.len());
     for item in items {
@@ -827,7 +867,7 @@ fn resolve_list(
 
 fn substitute_variables(
     value: &str,
-    variables: &HashMap<String, String>,
+    variables: &HashMap<String, LiteralValue>,
 ) -> Result<String, String> {
     let mut result = String::with_capacity(value.len());
     let mut cursor = 0;
@@ -850,7 +890,7 @@ fn substitute_variables(
         let replacement = variables
             .get(name)
             .ok_or_else(|| format!("undefined variable '{name}'"))?;
-        result.push_str(replacement);
+        result.push_str(&literal_to_string(replacement));
         cursor = end_idx + 1;
     }
 

@@ -46,14 +46,146 @@ def parse_value(raw: str) -> str:
     return raw
 
 
-def parse_override_arg(raw: str) -> Tuple[str, str]:
+def parse_literal(raw: str):
+    stripped = raw.strip()
+    if not stripped:
+        return ""
+    if stripped.startswith("[") and stripped.endswith("]"):
+        inner = stripped[1:-1]
+        if not inner.strip():
+            return []
+        return [parse_literal(item) for item in split_top_level(inner, ",") if item.strip()]
+    if stripped.startswith("{") and stripped.endswith("}"):
+        inner = stripped[1:-1]
+        result = {}
+        if inner.strip():
+            for entry in split_top_level(inner, ","):
+                key, value = split_key_value(entry)
+                result[parse_object_key(key)] = parse_literal(value)
+        return result
+    lower = stripped.lower()
+    if lower == "true":
+        return True
+    if lower == "false":
+        return False
+    if is_number_literal(stripped):
+        if any(c in stripped for c in ".eE"):
+            try:
+                return float(stripped)
+            except ValueError:
+                return stripped
+        try:
+            return int(stripped)
+        except ValueError:
+            return float(stripped)
+    if (stripped.startswith('"') and stripped.endswith('"')) or (
+        stripped.startswith("'") and stripped.endswith("'")
+    ):
+        return stripped[1:-1]
+    return stripped
+
+
+def split_top_level(text: str, delimiter: str) -> List[str]:
+    items: List[str] = []
+    depth = 0
+    in_quote: str | None = None
+    start = 0
+    idx = 0
+    while idx < len(text):
+        ch = text[idx]
+        if in_quote:
+            if ch == "\\":
+                idx += 1
+            elif ch == in_quote:
+                in_quote = None
+        else:
+            if ch in ('"', "'"):
+                in_quote = ch
+            elif ch in "[{":
+                depth += 1
+            elif ch in "}]":
+                depth -= 1
+            elif ch == delimiter and depth == 0:
+                items.append(text[start:idx].strip())
+                start = idx + 1
+        idx += 1
+    items.append(text[start:].strip())
+    return [item for item in items if item]
+
+
+def split_key_value(entry: str) -> Tuple[str, str]:
+    depth = 0
+    in_quote: str | None = None
+    for idx, ch in enumerate(entry):
+        if in_quote:
+            if ch == "\\":
+                continue
+            if ch == in_quote:
+                in_quote = None
+            continue
+        if ch in ('"', "'"):
+            in_quote = ch
+        elif ch in "[{":
+            depth += 1
+        elif ch in "}]":
+            depth -= 1
+        elif ch == ":" and depth == 0:
+            key = entry[:idx].strip()
+            value = entry[idx + 1 :].strip()
+            return key, value
+    raise ValueError(f"invalid map entry: {entry}")
+
+
+def parse_object_key(raw: str) -> str:
+    stripped = raw.strip()
+    if (stripped.startswith('"') and stripped.endswith('"')) or (
+        stripped.startswith("'") and stripped.endswith("'")
+    ):
+        return stripped[1:-1]
+    if not stripped or not all(ch.isalnum() or ch == "_" for ch in stripped):
+        raise ValueError(f"invalid object key: {raw}")
+    return stripped
+
+
+def is_number_literal(value: str) -> bool:
+    allowed = set("0123456789+-.eE")
+    return all(ch in allowed for ch in value) and any(ch.isdigit() for ch in value)
+
+
+def literal_to_json(value):
+    if isinstance(value, list):
+        return [literal_to_json(item) for item in value]
+    if isinstance(value, dict):
+        return {key: literal_to_json(v) for key, v in value.items()}
+    return value
+
+
+def literal_to_string(value) -> str:
+    if isinstance(value, (list, dict)):
+        return json.dumps(literal_to_json(value), ensure_ascii=False)
+    if isinstance(value, bool):
+        return 'true' if value else 'false'
+    return str(value)
+
+
+def resolve_literal(value, variables: Dict[str, object]):
+    if isinstance(value, str):
+        return substitute(value, variables)
+    if isinstance(value, list):
+        return [resolve_literal(item, variables) for item in value]
+    if isinstance(value, dict):
+        return {key: resolve_literal(v, variables) for key, v in value.items()}
+    return value
+
+
+def parse_override_arg(raw: str) -> Tuple[str, object]:
     if "=" not in raw:
         raise ValueError(f"expected KEY=VALUE, got '{raw}'")
     key, value = raw.split("=", 1)
     key = key.strip()
     if not key:
         raise ValueError(f"override key cannot be empty in '{raw}'")
-    return key, value
+    return key, parse_literal(value)
 
 
 def load_scenario(path: Path) -> ScenarioData:
@@ -157,7 +289,7 @@ def _load_recursive(path: Path, visited: set[Path]) -> ScenarioData:
     return scenario
 
 
-def _parse_let(line: str) -> Tuple[str, str]:
+def _parse_let(line: str) -> Tuple[str, object]:
     rest = line[len("let ") :].strip()
     if "=" not in rest:
         raise ValueError(f"Invalid let syntax: {line}")
@@ -165,7 +297,7 @@ def _parse_let(line: str) -> Tuple[str, str]:
     name = name.strip()
     if not name:
         raise ValueError(f"Invalid variable name in: {line}")
-    return name, parse_value(value)
+    return name, parse_literal(value)
 
 
 def _parse_group_header(line: str) -> str:
@@ -214,8 +346,8 @@ def _parse_output_label(remainder: str, default: str) -> str:
     return label
 
 
-def _parse_key_values(block_lines: List[str]) -> Dict[str, str]:
-    result: Dict[str, str] = {}
+def _parse_key_values(block_lines: List[str]) -> Dict[str, object]:
+    result: Dict[str, object] = {}
     for raw in block_lines:
         stripped = raw.strip()
         if not stripped or stripped.startswith("#") or stripped.startswith("//"):
@@ -295,7 +427,7 @@ def _find_closing_brace(line: str) -> int | None:
     return None
 
 
-def substitute(value: str, variables: Dict[str, str]) -> str:
+def substitute(value: str, variables: Dict[str, object]) -> str:
     result = []
     idx = 0
     while idx < len(value):
@@ -312,7 +444,7 @@ def substitute(value: str, variables: Dict[str, str]) -> str:
             raise ValueError("Empty variable placeholder")
         if name not in variables:
             raise ValueError(f"Undefined variable '{name}' in '{value}'")
-        result.append(variables[name])
+        result.append(literal_to_string(variables[name]))
         idx = end + 1
     return "".join(result)
 
@@ -326,10 +458,11 @@ def ensure_artifacts_dir() -> None:
 
 
 def build_summary(
-    scenario: ScenarioData, overrides: Dict[str, str] | None = None
+    scenario: ScenarioData, overrides: Dict[str, object] | None = None
 ) -> Dict[str, object]:
+    overrides = overrides or {}
     imports = sorted(set(scenario.imports))
-    variables: List[Dict[str, str]] = []
+    variables: List[Dict[str, object]] = []
     groups: List[Dict[str, object]] = []
     scans: List[Dict[str, object]] = []
     scripts: List[Dict[str, object]] = []
@@ -337,7 +470,7 @@ def build_summary(
 
     for step in scenario.steps:
         if step.type == "variable":
-            variables.append({"name": step.data["name"], "value": step.data["value"]})
+            variables.append({"name": step.data["name"], "value": literal_to_json(step.data["value"])})
         elif step.type == "group":
             groups.append({"name": step.data["name"], "properties": step.data["properties"]})
         elif step.type == "scan":
@@ -363,6 +496,11 @@ def build_summary(
                 }
             )
 
+    override_list = [
+        {"name": key, "value": literal_to_json(value)}
+        for key, value in sorted(overrides.items())
+    ]
+
     return {
         "total_steps": len(scenario.steps),
         "imports": imports,
@@ -371,10 +509,7 @@ def build_summary(
         "scans": scans,
         "scripts": scripts,
         "reports": reports,
-        "overrides": [
-            {"name": key, "value": value}
-            for key, value in (overrides or {}).items()
-        ],
+        "overrides": override_list,
     }
 
 
@@ -389,12 +524,12 @@ def format_summary(summary: Dict[str, object]) -> str:
     if overrides:
         lines.append("Overrides:")
         for item in overrides:
-            lines.append(f"  - {item['name']} = {item['value']}")
+            lines.append(f"  - {item['name']} = {literal_to_string(item['value'])}")
     variables = summary.get("variables", [])
     if variables:
         lines.append("Variables:")
         for var in variables:
-            lines.append(f"  - {var['name']} = {var['value']}")
+            lines.append(f"  - {var['name']} = {literal_to_string(var['value'])}")
     groups = summary.get("asset_groups", [])
     if groups:
         lines.append("Asset groups:")
@@ -425,19 +560,12 @@ def format_summary(summary: Dict[str, object]) -> str:
 def execute_scenario(
     scenario: ScenarioData,
     json_mode: bool,
-    overrides: Dict[str, str] | None = None,
+    overrides: Dict[str, object] | None = None,
 ) -> Tuple[Dict[str, object], List[Dict[str, object]], List[Dict[str, object]]]:
     ensure_artifacts_dir()
     override_raw = overrides or {}
-    variables: Dict[str, str] = {}
-    resolved_overrides: Dict[str, str] = {}
-    for key, value in override_raw.items():
-        try:
-            resolved = substitute(value, variables)
-        except Exception:
-            resolved = value
-        variables[key] = resolved
-        resolved_overrides[key] = resolved
+    variables: Dict[str, object] = dict(override_raw)
+    resolved_overrides: Dict[str, object] = {}
 
     artifacts: Dict[str, Dict[str, object]] = {}
     execution_steps: List[Dict[str, object]] = []
@@ -447,7 +575,7 @@ def execute_scenario(
             name = step.data["name"]
             if name in override_raw:
                 try:
-                    value = substitute(override_raw[name], variables)
+                    value = resolve_literal(override_raw[name], variables)
                 except Exception as exc:
                     execution_steps.append(
                         {
@@ -458,14 +586,26 @@ def execute_scenario(
                         }
                     )
                     continue
-                message = f"{name} = {value} (override)"
+                message = f"{name} = {literal_to_string(value)} (override)"
+                resolved_overrides[name] = value
             else:
-                value = substitute(step.data["value"], variables)
-                message = f"{name} = {value}"
-            variables[step.data["name"]] = value
+                try:
+                    value = resolve_literal(step.data["value"], variables)
+                except Exception as exc:
+                    execution_steps.append(
+                        {
+                            "name": name,
+                            "type": "variable",
+                            "status": "failed",
+                            "message": f"failed to resolve variables: {exc}",
+                        }
+                    )
+                    continue
+                message = f"{name} = {literal_to_string(value)}"
+            variables[name] = value
             execution_steps.append(
                 {
-                    "name": step.data["name"],
+                    "name": name,
                     "type": "variable",
                     "status": "completed",
                     "message": message,
@@ -526,7 +666,7 @@ def execute_scenario(
             )
 
     artifacts_list = list(artifacts.values())
-    summary = build_summary(scenario)
+    summary = build_summary(scenario, resolved_overrides or override_raw)
     return summary, execution_steps, artifacts_list
 
 
@@ -541,7 +681,7 @@ def _write_artifact(label: str, data: Dict[str, object]) -> Path | None:
         return None
 
 
-def _execute_scan(step_data: Dict[str, object], variables: Dict[str, str]) -> Dict[str, object]:
+def _execute_scan(step_data: Dict[str, object], variables: Dict[str, object]) -> Dict[str, object]:
     params = {
         key: substitute(value, variables)
         for key, value in step_data["params"].items()
@@ -612,7 +752,7 @@ def _execute_scan(step_data: Dict[str, object], variables: Dict[str, str]) -> Di
     }
 
 
-def _execute_script(step_data: Dict[str, object], variables: Dict[str, str]) -> Dict[str, object]:
+def _execute_script(step_data: Dict[str, object], variables: Dict[str, object]) -> Dict[str, object]:
     params = {
         key: substitute(value, variables)
         for key, value in step_data["params"].items()
@@ -693,7 +833,7 @@ def _execute_script(step_data: Dict[str, object], variables: Dict[str, str]) -> 
 
 def _execute_report(
     step_data: Dict[str, object],
-    variables: Dict[str, str],
+    variables: Dict[str, object],
     artifacts: Dict[str, Dict[str, object]],
     json_mode: bool,
 ) -> Dict[str, object]:
@@ -774,10 +914,6 @@ def run_command(args: argparse.Namespace) -> None:
             location = artifact.get("path") or "<memory>"
             print(f"  - {artifact['name']} ({artifact['kind']}) -> {location}")
 
-    artifacts_list = list(artifacts.values())
-    let_overrides = resolved_overrides if resolved_overrides else override_raw
-    summary = build_summary(scenario, let_overrides)
-    return summary, execution_steps, artifacts_list
 
 
 def build_arg_parser() -> argparse.ArgumentParser:

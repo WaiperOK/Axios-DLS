@@ -1,5 +1,7 @@
+use anyhow::anyhow;
 use axion_core::{
-    parse_scenario, ExecutionOutcome, Executor, Scenario, ScenarioSummary, Step, StoredArtifact,
+    parse_scenario, ExecutionOutcome, Executor, LiteralValue, Scenario, ScenarioSummary, Step,
+    StoredArtifact,
 };
 use clap::{ArgAction, Parser, Subcommand};
 use serde_json::json;
@@ -46,13 +48,13 @@ fn main() -> anyhow::Result<()> {
     match cli.command {
         Command::Plan { input, json, vars } => {
             let scenario = load_scenario(&input)?;
-            let overrides: HashMap<String, String> = vars.into_iter().collect();
+            let overrides = parse_overrides(vars)?;
             let summary = scenario.summary();
             output_plan(summary, json, &overrides)?;
         }
         Command::Run { input, json, vars } => {
             let scenario = load_scenario(&input)?;
-            let overrides: HashMap<String, String> = vars.into_iter().collect();
+            let overrides = parse_overrides(vars)?;
             let summary = scenario.summary();
             let executor = Executor::new();
             let outcome = executor.execute_with_vars(&scenario, &overrides);
@@ -104,7 +106,7 @@ fn load_scenario_recursive(
 fn output_plan(
     summary: ScenarioSummary,
     json: bool,
-    overrides: &HashMap<String, String>,
+    overrides: &HashMap<String, LiteralValue>,
 ) -> anyhow::Result<()> {
     if json {
         let payload = json!({
@@ -128,7 +130,7 @@ fn output_run(
     summary: ScenarioSummary,
     outcome: ExecutionOutcome,
     json: bool,
-    overrides: &HashMap<String, String>,
+    overrides: &HashMap<String, LiteralValue>,
 ) -> anyhow::Result<()> {
     if json {
         let payload = json!({
@@ -173,4 +175,14 @@ fn parse_key_val(s: &str) -> Result<(String, String), String> {
         return Err(format!("expected KEY=VALUE, got '{s}'"));
     }
     Ok((parts[0].trim().to_string(), parts[1].to_string()))
+}
+
+fn parse_overrides(vars: Vec<(String, String)>) -> anyhow::Result<HashMap<String, LiteralValue>> {
+    let mut map = HashMap::new();
+    for (key, raw) in vars {
+        let literal = axion_core::parse_literal_expression(&raw)
+            .map_err(|err| anyhow!("invalid override {key}: {err}"))?;
+        map.insert(key, literal);
+    }
+    Ok(map)
 }
