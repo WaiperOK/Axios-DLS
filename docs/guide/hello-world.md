@@ -41,8 +41,10 @@ EOF
 ## Execution
 
 ```
-cargo run -p axion-cli -- run scenarios/hello-world.ax
+cargo run -p axion-cli -- run scenarios/hello-world.ax --var greeting="Salutations"
 ```
+
+The optional `--var KEY=VALUE` flag overrides any `let` declaration at runtime; in this example the greeting interpolated inside the asset group is replaced without editing the source scenario. Repeat the flag to adjust multiple variables.
 
 - Observe the execution report and the JSON emitted by the `stdout` report.
 - Review `artifacts/banner_scan.json` to inspect the raw data captured from `nmap`.
@@ -62,3 +64,11 @@ rm -rf artifacts
 ```
 
 This minimal scenario serves as a template for more elaborate automation. Gradually layer additional directives, imports, and reporting targets to encode your own assessment methodology.
+
+For quick experiments without editing files, start the interactive console:
+
+```bash
+python tools/axion_repl.py
+```
+
+Use `:help` to list commands; buffers accept the same syntax demonstrated above.

@@ -46,6 +46,16 @@ def parse_value(raw: str) -> str:
     return raw
 
 
+def parse_override_arg(raw: str) -> Tuple[str, str]:
+    if "=" not in raw:
+        raise ValueError(f"expected KEY=VALUE, got '{raw}'")
+    key, value = raw.split("=", 1)
+    key = key.strip()
+    if not key:
+        raise ValueError(f"override key cannot be empty in '{raw}'")
+    return key, value
+
+
 def load_scenario(path: Path) -> ScenarioData:
     visited: set[Path] = set()
     return _load_recursive(path.resolve(), visited)
@@ -315,7 +325,9 @@ def ensure_artifacts_dir() -> None:
     ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
 
 
-def build_summary(scenario: ScenarioData) -> Dict[str, object]:
+def build_summary(
+    scenario: ScenarioData, overrides: Dict[str, str] | None = None
+) -> Dict[str, object]:
     imports = sorted(set(scenario.imports))
     variables: List[Dict[str, str]] = []
     groups: List[Dict[str, object]] = []
@@ -359,6 +371,10 @@ def build_summary(scenario: ScenarioData) -> Dict[str, object]:
         "scans": scans,
         "scripts": scripts,
         "reports": reports,
+        "overrides": [
+            {"name": key, "value": value}
+            for key, value in (overrides or {}).items()
+        ],
     }
 
 
@@ -369,6 +385,11 @@ def format_summary(summary: Dict[str, object]) -> str:
         lines.append("Imports:")
         for item in imports:
             lines.append(f"  - {item}")
+    overrides = summary.get("overrides", [])
+    if overrides:
+        lines.append("Overrides:")
+        for item in overrides:
+            lines.append(f"  - {item['name']} = {item['value']}")
     variables = summary.get("variables", [])
     if variables:
         lines.append("Variables:")
@@ -402,23 +423,52 @@ def format_summary(summary: Dict[str, object]) -> str:
 
 
 def execute_scenario(
-    scenario: ScenarioData, json_mode: bool
+    scenario: ScenarioData,
+    json_mode: bool,
+    overrides: Dict[str, str] | None = None,
 ) -> Tuple[Dict[str, object], List[Dict[str, object]], List[Dict[str, object]]]:
     ensure_artifacts_dir()
+    override_raw = overrides or {}
     variables: Dict[str, str] = {}
+    resolved_overrides: Dict[str, str] = {}
+    for key, value in override_raw.items():
+        try:
+            resolved = substitute(value, variables)
+        except Exception:
+            resolved = value
+        variables[key] = resolved
+        resolved_overrides[key] = resolved
+
     artifacts: Dict[str, Dict[str, object]] = {}
     execution_steps: List[Dict[str, object]] = []
 
     for step in scenario.steps:
         if step.type == "variable":
-            value = substitute(step.data["value"], variables)
+            name = step.data["name"]
+            if name in override_raw:
+                try:
+                    value = substitute(override_raw[name], variables)
+                except Exception as exc:
+                    execution_steps.append(
+                        {
+                            "name": name,
+                            "type": "variable",
+                            "status": "failed",
+                            "message": f"failed to resolve override: {exc}",
+                        }
+                    )
+                    continue
+                message = f"{name} = {value} (override)"
+            else:
+                value = substitute(step.data["value"], variables)
+                message = f"{name} = {value}"
             variables[step.data["name"]] = value
             execution_steps.append(
                 {
                     "name": step.data["name"],
                     "type": "variable",
                     "status": "completed",
-                    "message": f"{step.data['name']} = {value}",
+                    "message": message,
                 }
             )
         elif step.type == "group":
@@ -686,8 +736,10 @@ def _execute_report(
 
 
 def plan_command(args: argparse.Namespace) -> None:
+    overrides_list = [parse_override_arg(item) for item in args.var or []]
+    override_map = dict(overrides_list)
     scenario = load_scenario(Path(args.input))
-    summary = build_summary(scenario)
+    summary = build_summary(scenario, override_map)
     if args.json:
         print(json.dumps(summary, indent=2, ensure_ascii=False))
     else:
@@ -695,8 +747,10 @@ def plan_command(args: argparse.Namespace) -> None:
 
 
 def run_command(args: argparse.Namespace) -> None:
+    overrides_list = [parse_override_arg(item) for item in args.var or []]
+    override_map = dict(overrides_list)
     scenario = load_scenario(Path(args.input))
-    summary, execution, artifacts = execute_scenario(scenario, args.json)
+    summary, execution, artifacts = execute_scenario(scenario, args.json, override_map)
     if args.json:
         payload = {
             "summary": summary,
@@ -720,6 +774,11 @@ def run_command(args: argparse.Namespace) -> None:
             location = artifact.get("path") or "<memory>"
             print(f"  - {artifact['name']} ({artifact['kind']}) -> {location}")
 
+    artifacts_list = list(artifacts.values())
+    let_overrides = resolved_overrides if resolved_overrides else override_raw
+    summary = build_summary(scenario, let_overrides)
+    return summary, execution_steps, artifacts_list
+
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Axion DSL Python runner")
@@ -728,11 +787,25 @@ def build_arg_parser() -> argparse.ArgumentParser:
     plan = subparsers.add_parser("plan", help="Parse a scenario and print summary")
     plan.add_argument("input", help="Path to the scenario file")
     plan.add_argument("--json", action="store_true", help="Output JSON")
+    plan.add_argument(
+        "--var",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help="Override a variable (repeatable)",
+    )
     plan.set_defaults(func=plan_command)
 
     run = subparsers.add_parser("run", help="Execute a scenario")
     run.add_argument("input", help="Path to the scenario file")
     run.add_argument("--json", action="store_true", help="Output JSON")
+    run.add_argument(
+        "--var",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help="Override a variable (repeatable)",
+    )
     run.set_defaults(func=run_command)
 
     return parser

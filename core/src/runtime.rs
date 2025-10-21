@@ -33,9 +33,18 @@ impl Executor {
     }
 
     pub fn execute(&self, scenario: &Scenario) -> ExecutionOutcome {
+        let empty = HashMap::new();
+        self.execute_with_vars(scenario, &empty)
+    }
+
+    pub fn execute_with_vars(
+        &self,
+        scenario: &Scenario,
+        overrides: &HashMap<String, String>,
+    ) -> ExecutionOutcome {
         let mut steps = Vec::new();
         let mut store: HashMap<String, StoredArtifact> = HashMap::new();
-        let mut variables: HashMap<String, String> = HashMap::new();
+        let mut variables: HashMap<String, String> = overrides.clone();
 
         for step in &scenario.steps {
             if matches!(step, Step::Import(_)) {
@@ -43,7 +52,7 @@ impl Executor {
             }
             let outcome = match step {
                 Step::Import(_) => unreachable!("import steps must be resolved before execution"),
-                Step::Variable(var) => self.process_variable(var, &mut variables),
+                Step::Variable(var) => self.process_variable(var, overrides, &mut variables),
                 Step::AssetGroup(group) => self.process_asset_group(group, &variables),
                 Step::Scan(scan) => self.process_scan(scan, &variables),
                 Step::Script(script) => self.process_script(script, &variables),
@@ -325,16 +334,30 @@ impl Executor {
     fn process_variable(
         &self,
         variable: &VariableDecl,
+        overrides: &HashMap<String, String>,
         variables: &mut HashMap<String, String>,
     ) -> StepOutcome {
-        let resolved = match substitute_variables(&variable.value, variables) {
-            Ok(value) => value,
-            Err(err) => {
-                return StepOutcome::from_execution(StepExecution::failed(
-                    variable.name.clone(),
-                    StepKind::Variable,
-                    Some(format!("failed to resolve variables: {err}")),
-                ))
+        let (resolved, note) = if let Some(raw) = overrides.get(&variable.name) {
+            match substitute_variables(raw, variables) {
+                Ok(value) => (value, Some("(override)")),
+                Err(err) => {
+                    return StepOutcome::from_execution(StepExecution::failed(
+                        variable.name.clone(),
+                        StepKind::Variable,
+                        Some(format!("failed to resolve override: {err}")),
+                    ))
+                }
+            }
+        } else {
+            match substitute_variables(&variable.value, variables) {
+                Ok(value) => (value, None),
+                Err(err) => {
+                    return StepOutcome::from_execution(StepExecution::failed(
+                        variable.name.clone(),
+                        StepKind::Variable,
+                        Some(format!("failed to resolve variables: {err}")),
+                    ))
+                }
             }
         };
 
@@ -343,7 +366,10 @@ impl Executor {
         StepOutcome::from_execution(StepExecution::completed(
             variable.name.clone(),
             StepKind::Variable,
-            Some(format!("{} = {}", variable.name, resolved)),
+            Some(match note {
+                Some(tag) => format!("{} = {} {}", variable.name, resolved, tag),
+                None => format!("{} = {}", variable.name, resolved),
+            }),
         ))
     }
 

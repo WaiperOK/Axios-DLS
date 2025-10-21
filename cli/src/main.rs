@@ -1,9 +1,9 @@
 use axion_core::{
     parse_scenario, ExecutionOutcome, Executor, Scenario, ScenarioSummary, Step, StoredArtifact,
 };
-use clap::{Parser, Subcommand};
+use clap::{ArgAction, Parser, Subcommand};
 use serde_json::json;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -23,6 +23,9 @@ enum Command {
         /// Output JSON instead of a human-readable summary
         #[arg(long)]
         json: bool,
+        /// Override a variable (format: key=value). Repeat for multiple overrides.
+        #[arg(long = "var", value_parser = parse_key_val, value_name = "KEY=VALUE", action = ArgAction::Append)]
+        vars: Vec<(String, String)>,
     },
     /// Parse a scenario file and perform a dry-run (plan + placeholder execution)
     Run {
@@ -31,6 +34,9 @@ enum Command {
         /// Output JSON instead of a human-readable summary
         #[arg(long)]
         json: bool,
+        /// Override a variable (format: key=value). Repeat for multiple overrides.
+        #[arg(long = "var", value_parser = parse_key_val, value_name = "KEY=VALUE", action = ArgAction::Append)]
+        vars: Vec<(String, String)>,
     },
 }
 
@@ -38,17 +44,19 @@ fn main() -> anyhow::Result<()> {
     let cli = AxionCli::parse();
 
     match cli.command {
-        Command::Plan { input, json } => {
+        Command::Plan { input, json, vars } => {
             let scenario = load_scenario(&input)?;
+            let overrides: HashMap<String, String> = vars.into_iter().collect();
             let summary = scenario.summary();
-            output_plan(summary, json)?;
+            output_plan(summary, json, &overrides)?;
         }
-        Command::Run { input, json } => {
+        Command::Run { input, json, vars } => {
             let scenario = load_scenario(&input)?;
+            let overrides: HashMap<String, String> = vars.into_iter().collect();
             let summary = scenario.summary();
             let executor = Executor::new();
-            let outcome = executor.execute(&scenario);
-            output_run(summary, outcome, json)?;
+            let outcome = executor.execute_with_vars(&scenario, &overrides);
+            output_run(summary, outcome, json, &overrides)?;
         }
     }
 
@@ -93,12 +101,25 @@ fn load_scenario_recursive(
     Ok(Scenario { steps, imports })
 }
 
-fn output_plan(summary: ScenarioSummary, json: bool) -> anyhow::Result<()> {
+fn output_plan(
+    summary: ScenarioSummary,
+    json: bool,
+    overrides: &HashMap<String, String>,
+) -> anyhow::Result<()> {
     if json {
-        let payload = serde_json::to_string_pretty(&summary)?;
-        println!("{payload}");
+        let payload = json!({
+            "summary": summary,
+            "overrides": overrides,
+        });
+        println!("{}", serde_json::to_string_pretty(&payload)?);
     } else {
         println!("{summary}");
+        if !overrides.is_empty() {
+            println!("\nOverrides (--var):");
+            for (key, value) in overrides {
+                println!("  - {} = {}", key, value);
+            }
+        }
     }
     Ok(())
 }
@@ -107,16 +128,25 @@ fn output_run(
     summary: ScenarioSummary,
     outcome: ExecutionOutcome,
     json: bool,
+    overrides: &HashMap<String, String>,
 ) -> anyhow::Result<()> {
     if json {
         let payload = json!({
             "summary": summary,
             "execution": outcome.report,
             "artifacts": outcome.artifacts,
+            "overrides": overrides,
         });
         println!("{}", serde_json::to_string_pretty(&payload)?);
     } else {
         println!("{summary}\n");
+        if !overrides.is_empty() {
+            println!("Overrides (--var):");
+            for (key, value) in overrides {
+                println!("  - {} = {}", key, value);
+            }
+            println!();
+        }
         println!("{}", outcome.report);
         if outcome.report.has_failures() {
             println!("\n[warn] some steps failed");
@@ -135,4 +165,12 @@ fn output_run(
         }
     }
     Ok(())
+}
+
+fn parse_key_val(s: &str) -> Result<(String, String), String> {
+    let parts: Vec<&str> = s.splitn(2, '=').collect();
+    if parts.len() != 2 || parts[0].trim().is_empty() {
+        return Err(format!("expected KEY=VALUE, got '{s}'"));
+    }
+    Ok((parts[0].trim().to_string(), parts[1].to_string()))
 }
