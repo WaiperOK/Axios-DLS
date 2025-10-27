@@ -19,6 +19,8 @@ pub enum Step {
     Variable(VariableDecl),
     Script(ScriptStep),
     Report(ReportStep),
+    Conditional(ConditionalStep),
+    Loop(LoopStep),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -54,12 +56,48 @@ pub struct ReportStep {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConditionalStep {
+    pub condition: ConditionExpr,
+    pub then_steps: Vec<Step>,
+    #[serde(default)]
+    pub else_steps: Vec<Step>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LoopStep {
+    pub iterator: String,
+    pub iterable: LoopIterable,
+    pub body: Vec<Step>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ConditionExpr {
+    Literal(bool),
+    Variable(String),
+    Not(Box<ConditionExpr>),
+    Equals(ConditionOperand, ConditionOperand),
+    NotEquals(ConditionOperand, ConditionOperand),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ConditionOperand {
+    Variable(String),
+    Literal(LiteralValue),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum LoopIterable {
+    Variable(String),
+    Literal(LiteralValue),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VariableDecl {
     pub name: String,
     pub value: LiteralValue,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum LiteralValue {
     String(String),
     Number(f64),
@@ -87,31 +125,51 @@ pub fn parse_scenario(source: &str) -> Result<Scenario, ParseError> {
 
     while let Some((_, raw_line)) = next_non_empty(&mut lines) {
         let trimmed = raw_line.trim();
-        if trimmed.starts_with("import ") {
-            let path = parse_import(trimmed)?;
-            imports.push(path.clone());
-            steps.push(Step::Import(ImportStep { path }));
-        } else if trimmed.starts_with("asset_group ") {
-            let step = parse_asset_group(trimmed, &mut lines)?;
-            steps.push(Step::AssetGroup(step));
-        } else if trimmed.starts_with("scan ") {
-            let step = parse_scan(trimmed, &mut lines)?;
-            steps.push(Step::Scan(step));
-        } else if trimmed.starts_with("let ") {
-            let step = parse_variable(trimmed)?;
-            steps.push(Step::Variable(step));
-        } else if trimmed.starts_with("script ") {
-            let step = parse_script(trimmed, &mut lines)?;
-            steps.push(Step::Script(step));
-        } else if trimmed.starts_with("report ") {
-            let step = parse_report(trimmed, &mut lines)?;
-            steps.push(Step::Report(step));
-        } else {
-            return Err(ParseError::InvalidDirective(trimmed.to_string()));
-        }
+        let step = parse_step_internal(trimmed, &mut lines, &mut imports)?;
+        steps.push(step);
     }
 
     Ok(Scenario { steps, imports })
+}
+
+fn parse_step_internal<'a, I>(
+    first_line: &str,
+    lines: &mut PeekableLines<'a, I>,
+    imports: &mut Vec<String>,
+) -> Result<Step, ParseError>
+where
+    I: Iterator<Item = (usize, &'a str)>,
+{
+    if first_line.starts_with("import ") {
+        let path = parse_import(first_line)?;
+        imports.push(path.clone());
+        Ok(Step::Import(ImportStep { path }))
+    } else if first_line.starts_with("asset_group ") || first_line.starts_with("group ") {
+        let step = parse_asset_group(first_line, lines)?;
+        Ok(Step::AssetGroup(step))
+    } else if first_line.starts_with("scan ") {
+        let step = parse_scan(first_line, lines)?;
+        Ok(Step::Scan(step))
+    } else if first_line.starts_with("let ") {
+        let step = parse_variable(first_line)?;
+        Ok(Step::Variable(step))
+    } else if first_line.starts_with("script ") {
+        let step = parse_script(first_line, lines)?;
+        Ok(Step::Script(step))
+    } else if first_line.starts_with("report ") {
+        let step = parse_report(first_line, lines)?;
+        Ok(Step::Report(step))
+    } else if first_line.starts_with("if ") {
+        let step = parse_if(first_line, lines, imports)?;
+        Ok(Step::Conditional(step))
+    } else if first_line.starts_with("for ") {
+        let step = parse_for(first_line, lines, imports)?;
+        Ok(Step::Loop(step))
+    } else if first_line.starts_with("else") {
+        Err(ParseError::InvalidDirective(first_line.to_string()))
+    } else {
+        Err(ParseError::InvalidDirective(first_line.to_string()))
+    }
 }
 
 fn parse_asset_group<'a, I>(
@@ -337,6 +395,230 @@ where
     })
 }
 
+fn parse_if<'a, I>(
+    first_line: &str,
+    lines: &mut PeekableLines<'a, I>,
+    imports: &mut Vec<String>,
+) -> Result<ConditionalStep, ParseError>
+where
+    I: Iterator<Item = (usize, &'a str)>,
+{
+    let (header, body) = split_header_body(first_line)?;
+    let condition_raw = header
+        .strip_prefix("if")
+        .ok_or_else(|| ParseError::InvalidSyntax(first_line.to_string()))?
+        .trim();
+    if condition_raw.is_empty() {
+        return Err(ParseError::InvalidSyntax(first_line.to_string()));
+    }
+    if let Some(content) = body {
+        if !content.is_empty() {
+            return Err(ParseError::InvalidSyntax(content.to_string()));
+        }
+    }
+
+    let condition = parse_condition_expr(condition_raw)?;
+    let (then_steps, trailing) = parse_block_steps(lines, imports)?;
+
+    let mut else_steps = Vec::new();
+    let mut remaining = trailing;
+
+    if remaining.is_none() {
+        if let Some((_, peek_line)) = peek_non_empty(lines) {
+            let trimmed = peek_line.trim();
+            if trimmed.starts_with("else") {
+                let (_, consumed) =
+                    next_non_empty(lines).ok_or(ParseError::UnexpectedEof("else block"))?;
+                remaining = Some(consumed.trim().to_string());
+            }
+        }
+    }
+
+    if let Some(clause) = remaining {
+        if clause.starts_with("else if ") {
+            let nested_line = clause["else ".len()..].trim_start();
+            let nested = parse_if(nested_line, lines, imports)?;
+            else_steps.push(Step::Conditional(nested));
+        } else if clause.starts_with("else") {
+            let (header, remainder) = split_header_body(&clause)?;
+            if header != "else" {
+                return Err(ParseError::InvalidSyntax(clause));
+            }
+            if let Some(content) = remainder {
+                if !content.is_empty() {
+                    return Err(ParseError::InvalidSyntax(content.to_string()));
+                }
+            }
+            let (steps, trailing_after_else) = parse_block_steps(lines, imports)?;
+            if let Some(rest) = trailing_after_else {
+                return Err(ParseError::InvalidSyntax(rest));
+            }
+            else_steps = steps;
+        } else {
+            return Err(ParseError::InvalidSyntax(clause));
+        }
+    }
+
+    Ok(ConditionalStep {
+        condition,
+        then_steps,
+        else_steps,
+    })
+}
+
+fn parse_for<'a, I>(
+    first_line: &str,
+    lines: &mut PeekableLines<'a, I>,
+    imports: &mut Vec<String>,
+) -> Result<LoopStep, ParseError>
+where
+    I: Iterator<Item = (usize, &'a str)>,
+{
+    let (header, body) = split_header_body(first_line)?;
+    let rest = header
+        .strip_prefix("for")
+        .ok_or_else(|| ParseError::InvalidSyntax(first_line.to_string()))?
+        .trim();
+
+    let in_pos = rest
+        .find(" in ")
+        .ok_or_else(|| ParseError::InvalidSyntax(first_line.to_string()))?;
+    let iterator = rest[..in_pos].trim();
+    let iterable_raw = rest[in_pos + 4..].trim();
+
+    if iterator.is_empty() || !is_identifier(iterator) {
+        return Err(ParseError::InvalidSyntax(iterator.to_string()));
+    }
+    if iterable_raw.is_empty() {
+        return Err(ParseError::InvalidSyntax(first_line.to_string()));
+    }
+
+    if let Some(content) = body {
+        if !content.is_empty() {
+            return Err(ParseError::InvalidSyntax(content.to_string()));
+        }
+    }
+
+    let iterable = parse_loop_iterable(iterable_raw)?;
+    let (body_steps, trailing) = parse_block_steps(lines, imports)?;
+    if let Some(rest) = trailing {
+        return Err(ParseError::InvalidSyntax(rest));
+    }
+
+    Ok(LoopStep {
+        iterator: iterator.to_string(),
+        iterable,
+        body: body_steps,
+    })
+}
+
+fn parse_block_steps<'a, I>(
+    lines: &mut PeekableLines<'a, I>,
+    imports: &mut Vec<String>,
+) -> Result<(Vec<Step>, Option<String>), ParseError>
+where
+    I: Iterator<Item = (usize, &'a str)>,
+{
+    let mut steps = Vec::new();
+    loop {
+        let (_, raw_line) = next_non_empty(lines).ok_or(ParseError::UnexpectedEof("block"))?;
+        let trimmed = raw_line.trim();
+        if trimmed.starts_with('}') {
+            let remainder = trimmed[1..].trim();
+            if remainder.is_empty() {
+                return Ok((steps, None));
+            } else {
+                return Ok((steps, Some(remainder.to_string())));
+            }
+        }
+        let step = parse_step_internal(trimmed, lines, imports)?;
+        steps.push(step);
+    }
+}
+
+fn peek_non_empty<'a, I>(lines: &mut PeekableLines<'a, I>) -> Option<(usize, &'a str)>
+where
+    I: Iterator<Item = (usize, &'a str)>,
+{
+    while let Some((idx, line)) = lines.peek() {
+        let trimmed = line.trim_start();
+        if trimmed.is_empty() || trimmed.starts_with("//") || trimmed.starts_with('#') {
+            lines.next();
+            continue;
+        }
+        return Some((*idx, *line));
+    }
+    None
+}
+
+fn parse_condition_expr(expr: &str) -> Result<ConditionExpr, ParseError> {
+    let trimmed = expr.trim();
+    if trimmed.is_empty() {
+        return Err(ParseError::InvalidSyntax(expr.to_string()));
+    }
+
+    if let Some(pos) = find_operator(trimmed, "==") {
+        let left = &trimmed[..pos];
+        let right = &trimmed[pos + 2..];
+        let left_operand = parse_condition_operand(left)?;
+        let right_operand = parse_condition_operand(right)?;
+        return Ok(ConditionExpr::Equals(left_operand, right_operand));
+    }
+    if let Some(pos) = find_operator(trimmed, "!=") {
+        let left = &trimmed[..pos];
+        let right = &trimmed[pos + 2..];
+        let left_operand = parse_condition_operand(left)?;
+        let right_operand = parse_condition_operand(right)?;
+        return Ok(ConditionExpr::NotEquals(left_operand, right_operand));
+    }
+
+    if trimmed.starts_with('!') {
+        let inner = parse_condition_expr(trimmed[1..].trim())?;
+        return Ok(ConditionExpr::Not(Box::new(inner)));
+    }
+
+    if trimmed.eq("true") {
+        return Ok(ConditionExpr::Literal(true));
+    }
+    if trimmed.eq("false") {
+        return Ok(ConditionExpr::Literal(false));
+    }
+    if is_identifier(trimmed) {
+        return Ok(ConditionExpr::Variable(trimmed.to_string()));
+    }
+
+    if let Ok(literal) = parse_literal(trimmed) {
+        if let LiteralValue::Boolean(value) = literal {
+            return Ok(ConditionExpr::Literal(value));
+        }
+    }
+
+    Err(ParseError::InvalidSyntax(trimmed.to_string()))
+}
+
+fn parse_condition_operand(value: &str) -> Result<ConditionOperand, ParseError> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(ParseError::InvalidSyntax(value.to_string()));
+    }
+
+    if is_identifier(trimmed) {
+        Ok(ConditionOperand::Variable(trimmed.to_string()))
+    } else {
+        let literal = parse_literal(trimmed)?;
+        Ok(ConditionOperand::Literal(literal))
+    }
+}
+
+fn parse_loop_iterable(value: &str) -> Result<LoopIterable, ParseError> {
+    if is_identifier(value) {
+        Ok(LoopIterable::Variable(value.to_string()))
+    } else {
+        let literal = parse_literal(value)?;
+        Ok(LoopIterable::Literal(literal))
+    }
+}
+
 fn parse_scan_header(line: &str) -> Result<(&str, &str), ParseError> {
     let cleaned = line.trim_end_matches('{').trim();
     let tokens: Vec<&str> = cleaned.split_whitespace().collect();
@@ -529,6 +811,65 @@ fn parse_number_literal(value: &str) -> Option<f64> {
     None
 }
 
+fn find_operator(input: &str, operator: &str) -> Option<usize> {
+    if operator.is_empty() {
+        return None;
+    }
+    let chars: Vec<char> = input.chars().collect();
+    let op_chars: Vec<char> = operator.chars().collect();
+    let mut depth = 0i32;
+    let mut in_quote: Option<char> = None;
+    let mut idx = 0usize;
+    while idx + op_chars.len() <= chars.len() {
+        let current = chars[idx];
+        if let Some(q) = in_quote {
+            if current == '\\' {
+                idx += 1;
+            } else if current == q {
+                in_quote = None;
+            }
+            idx += 1;
+            continue;
+        }
+        match current {
+            '"' | '\'' => {
+                in_quote = Some(current);
+                idx += 1;
+                continue;
+            }
+            '[' | '{' | '(' => {
+                depth += 1;
+                idx += 1;
+                continue;
+            }
+            ']' | '}' | ')' => {
+                depth -= 1;
+                idx += 1;
+                continue;
+            }
+            _ => {}
+        }
+        if depth == 0 {
+            let mut matches = true;
+            for (offset, ch) in op_chars.iter().enumerate() {
+                if chars[idx + offset] != *ch {
+                    matches = false;
+                    break;
+                }
+            }
+            if matches {
+                return Some(idx);
+            }
+        }
+        idx += 1;
+    }
+    None
+}
+
+fn is_identifier(value: &str) -> bool {
+    !value.is_empty() && value.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
 fn split_top_level(input: &str, delimiter: char) -> Result<Vec<&str>, ParseError> {
     let mut items = Vec::new();
     let mut depth = 0i32;
@@ -655,71 +996,49 @@ impl fmt::Display for LiteralValue {
     }
 }
 
+impl fmt::Display for ConditionExpr {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ConditionExpr::Literal(value) => write!(f, "{value}"),
+            ConditionExpr::Variable(name) => write!(f, "{name}"),
+            ConditionExpr::Not(inner) => write!(f, "!{}", inner),
+            ConditionExpr::Equals(left, right) => write!(f, "{} == {}", left, right),
+            ConditionExpr::NotEquals(left, right) => write!(f, "{} != {}", left, right),
+        }
+    }
+}
+
+impl fmt::Display for ConditionOperand {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ConditionOperand::Variable(name) => write!(f, "{name}"),
+            ConditionOperand::Literal(value) => write!(f, "{}", value.display()),
+        }
+    }
+}
+
+impl fmt::Display for LoopIterable {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            LoopIterable::Variable(name) => write!(f, "{name}"),
+            LoopIterable::Literal(value) => write!(f, "{}", value.display()),
+        }
+    }
+}
+
 impl Scenario {
     pub fn summary(&self) -> ScenarioSummary {
         let import_list: BTreeSet<String> = self.imports.iter().cloned().collect();
+        let mut accumulator = SummaryAccumulator::default();
+        collect_summary_steps(&self.steps, &mut accumulator);
         ScenarioSummary {
-            total_steps: self.steps.len(),
+            total_steps: accumulator.total_steps,
             imports: import_list.into_iter().collect(),
-            variables: self
-                .steps
-                .iter()
-                .filter_map(|step| match step {
-                    Step::Variable(var) => Some(VariableSummary {
-                        name: var.name.clone(),
-                        value: var.value.clone(),
-                    }),
-                    _ => None,
-                })
-                .collect(),
-            asset_groups: self
-                .steps
-                .iter()
-                .filter_map(|step| match step {
-                    Step::AssetGroup(group) => Some(AssetGroupSummary {
-                        name: group.name.clone(),
-                        properties: group.properties.clone(),
-                    }),
-                    _ => None,
-                })
-                .collect(),
-            scans: self
-                .steps
-                .iter()
-                .filter_map(|step| match step {
-                    Step::Scan(scan) => Some(ScanSummary {
-                        name: scan.name.clone(),
-                        tool: scan.tool.clone(),
-                        output: scan.output.clone(),
-                    }),
-                    _ => None,
-                })
-                .collect(),
-            scripts: self
-                .steps
-                .iter()
-                .filter_map(|step| match step {
-                    Step::Script(script) => {
-                        script.params.get("run").cloned().map(|run| ScriptSummary {
-                            name: script.name.clone(),
-                            run,
-                            output: script.output.clone(),
-                        })
-                    }
-                    _ => None,
-                })
-                .collect(),
-            reports: self
-                .steps
-                .iter()
-                .filter_map(|step| match step {
-                    Step::Report(report) => Some(ReportSummary {
-                        name: report.name.clone(),
-                        includes: report.includes.clone(),
-                    }),
-                    _ => None,
-                })
-                .collect(),
+            variables: accumulator.variables,
+            asset_groups: accumulator.asset_groups,
+            scans: accumulator.scans,
+            scripts: accumulator.scripts,
+            reports: accumulator.reports,
         }
     }
 }
@@ -765,6 +1084,58 @@ pub struct ReportSummary {
 pub struct VariableSummary {
     pub name: String,
     pub value: LiteralValue,
+}
+
+#[derive(Default)]
+struct SummaryAccumulator {
+    total_steps: usize,
+    variables: Vec<VariableSummary>,
+    asset_groups: Vec<AssetGroupSummary>,
+    scans: Vec<ScanSummary>,
+    scripts: Vec<ScriptSummary>,
+    reports: Vec<ReportSummary>,
+}
+
+fn collect_summary_steps(steps: &[Step], acc: &mut SummaryAccumulator) {
+    for step in steps {
+        acc.total_steps += 1;
+        match step {
+            Step::Import(_) => {}
+            Step::Variable(var) => acc.variables.push(VariableSummary {
+                name: var.name.clone(),
+                value: var.value.clone(),
+            }),
+            Step::AssetGroup(group) => acc.asset_groups.push(AssetGroupSummary {
+                name: group.name.clone(),
+                properties: group.properties.clone(),
+            }),
+            Step::Scan(scan) => acc.scans.push(ScanSummary {
+                name: scan.name.clone(),
+                tool: scan.tool.clone(),
+                output: scan.output.clone(),
+            }),
+            Step::Script(script) => {
+                if let Some(run) = script.params.get("run").cloned() {
+                    acc.scripts.push(ScriptSummary {
+                        name: script.name.clone(),
+                        run,
+                        output: script.output.clone(),
+                    });
+                }
+            }
+            Step::Report(report) => acc.reports.push(ReportSummary {
+                name: report.name.clone(),
+                includes: report.includes.clone(),
+            }),
+            Step::Conditional(block) => {
+                collect_summary_steps(&block.then_steps, acc);
+                collect_summary_steps(&block.else_steps, acc);
+            }
+            Step::Loop(loop_step) => {
+                collect_summary_steps(&loop_step.body, acc);
+            }
+        }
+    }
 }
 
 impl fmt::Display for ScenarioSummary {

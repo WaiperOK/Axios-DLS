@@ -9,9 +9,9 @@ The reference runtime, implemented in `core/src/runtime.rs`, materialises the op
 - Creates the artifact store directory (`artifacts/`) on instantiation.
 - Maintains:
   - An in-memory `HashMap<String, StoredArtifact>` keyed by artifact name.
-  - The variable store (`HashMap<String, String>`) populated by `let` directives.
+  - The variable store (`HashMap<String, LiteralValue>`) populated by `let` directives and CLI overrides.
   - The execution trace (vector of `StepExecution` records).
-- Provides `execute(&Scenario)` which iterates over flattened steps, dispatching to specialised handlers.
+- Provides `execute(&Scenario)` which iterates over flattened steps, dispatching to specialised handlers (variables, assets, scans, scripts, conditionals, loops, reports).
 
 ### StepOutcome
 
@@ -35,9 +35,10 @@ Defined in `core/src/artifact.rs`:
 ## Dispatch Flow
 
 1. Skip `import` directives (already resolved).
-2. Invoke `process_variable`, `process_asset_group`, `process_scan`, `process_script`, or `process_report` depending on the step type.
+2. Invoke `process_variable`, `process_asset_group`, `process_scan`, `process_script`, `process_conditional`, `process_loop`, or `process_report` depending on the step type.
 3. For each stage, attach any generated artifact to the store using `StoredArtifact::name` as the key.
-4. After the iteration, return the execution report and artifact list.
+4. Recurse into nested blocks (`if` branches, `for` bodies) so that child steps share the same variable store and artifact registry.
+5. After traversal completes, return the execution report and collected artifacts.
 
 ## Variable Resolution
 
@@ -51,6 +52,17 @@ Defined in `core/src/artifact.rs`:
 ## Script Execution
 
 Script handlers closely mirror generic scans but enforce the presence of `run`. They tokenise the command line using `shell_words` to align with POSIX-style quoting, even on Windows targets.
+
+## Control Flow Handling
+
+- `process_conditional` evaluates boolean expressions (literals, variables, negation, equality/inequality) and records a `StepExecution` describing the outcome before executing the matching branch.
+- `process_loop` resolves iterables to `LiteralValue` sequences, binds the loop variable per iteration, and restores any previous binding after completion.
+- Both handlers delegate to `execute_steps`, so nested directives share the same artifact store, override map, and execution log as their parent context.
+
+## Parameter Validation
+
+- `validate_scenario` runs before planning to ensure builtin tool schemas are satisfied (for example, `nmap` requires `target`, `gobuster` requires both `target` and `args`).
+- Diagnostics surface with severity (`error`/`warn`) and are emitted even in JSON output, allowing CI pipelines to fail early.
 
 ## Reporting Pipeline
 
@@ -72,3 +84,8 @@ Future runtime extensions should respect the following constraints:
 - **Deterministic scheduling**: even when introducing parallel execution, ordering guarantees should be maintained or made explicit.
 
 This architectural baseline emphasises clarity over throughput, enabling practitioners to audit every transformation from scenario to artifact.
+
+
+
+
+

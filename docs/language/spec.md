@@ -10,13 +10,14 @@ This document highlights normative rules that govern Axios DSL. It supplements t
 
 ## Directives
 
-- Directive keywords are reserved: `import`, `let`, `asset_group`, `group`, `scan`, `script`, `report`.
+- Directive keywords are reserved: `import`, `let`, `asset_group`, `group`, `scan`, `script`, `report`, `if`, `else`, `for`.
 - Identifiers **must** match `[A-Za-z0-9_-]+`. The parser rejects identifiers starting with digits for variables.
 - Imports **must** resolve to accessible files; cyclic imports are ignored after the first inclusion to prevent infinite recursion.
 
 ## Variables
 
-- Variables are string-valued. Future revisions may introduce richer types, but all interpolation currently yields strings.
+- Variables store typed literals (string, number, boolean, array, object) as normalised values.
+- Interpolation resolves variables at runtime and renders them as strings; arrays and objects are encoded as JSON.
 - Undefined variables raise runtime errors when encountered.
 - Nested interpolation or expression evaluation is not supported; authors **must** precompute complex values externally.
 
@@ -27,9 +28,14 @@ This document highlights normative rules that govern Axios DSL. It supplements t
 
 ## Scans and Scripts
 
-- Step names and artifact aliases share the same namespace. Authors should ensure that artifact names referenced in reports are unique.
-- The executor does not sandbox external tools. Scenarios **must** run on hardened hosts.
-- Timeouts and retries are currently absent; scripts requiring resilience should handle retries internally.
+- Step names and artifact aliases share the same namespace. Authors should ensure that artifact names referenced in reports are unique.\n- The executor does not sandbox external tools. Scenarios **must** run on hardened hosts.\n- Timeouts and retries are currently absent; scripts requiring resilience should handle retries internally.\n- The CLI planner validates builtin tools (e.g., 
+map requires 	arget); diagnostics are emitted before execution.
+
+## Control Flow
+
+- `if <expr> { ... }` evaluates boolean expressions. Supported forms include literals (`true`/`false`), boolean variables, logical negation (`!expr`), and equality/inequality comparisons (`a == b`, `a != b`) between literals or variables. `else` and `else if <expr>` clauses are optional; only the matching branch executes.
+- `for <name> in <iterable> { ... }` iterates over arrays or single values. `<iterable>` accepts literals (e.g., `["a", "b"]`) or variables containing arrays or strings. Each iteration binds `<name>` to the current `LiteralValue`, executes the loop body, and restores any previously defined value for `<name>` after the loop completes.
+- Steps nested inside control-flow blocks behave identically to top-level directives: they may import modules, declare variables, or emit artifacts. Failures within a branch or iteration do not abort subsequent steps unless explicitly coded.
 
 ## Reports
 
@@ -43,3 +49,5 @@ This document highlights normative rules that govern Axios DSL. It supplements t
 - Deprecations follow a two-release policy: marked deprecated in one release, removed in the next with clear warnings.
 
 For a full grammar, consult `docs/book/appendix-grammar.md`. Runtime specifics and artifact schemas are defined in `docs/book/semantics.md` and `docs/book/appendix-artifacts.md`.
+
+

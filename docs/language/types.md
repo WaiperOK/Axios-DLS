@@ -1,25 +1,50 @@
-# Type Considerations
+# Typed Values
 
-Axios DSL is presently a string-oriented language. Nevertheless, the runtime and emerging tooling treat several concepts as implicitly typed. This document describes the current behaviour and outlines possible evolutions toward richer typing and effect systems.
+Axios variables now carry structured values rather than raw strings. The parser normalises literals into the following enum:
 
-## Current State
+| Literal        | Example                                              | Notes                                                                 |
+|----------------|------------------------------------------------------|-----------------------------------------------------------------------|
+| `String`       | `"hello"` or `hello`                                 | Unquoted tokens fall back to strings.                                |
+| `Number`       | `42`, `3.14`, `-10`                                  | Parsed as `f64`; the executor preserves integer-looking formats.     |
+| `Boolean`      | `true`, `false`                                      | Case sensitive.                                                       |
+| `Array`        | `[1, 2, "three"]`                                    | Elements may mix types.                                               |
+| `Object`       | `{ host: "app", ports: [80, 443] }`                  | Keys may be bare identifiers or quoted strings; values follow any rule above. |
 
-- **Variables** — Stored as strings. Consumers perform ad hoc parsing (e.g., interpreting `10.0.0.0/24` as a network range).
-- **Asset properties** — Strings mapped by key. Shared conventions (such as `cidr`, `scope`, `owner`) rely on documentation rather than enforcement.
-- **Scan parameters** — Strings that influence command invocation. Keys such as `flags` and `target` have conventional meaning but no type checking.
-- **Artifacts** — JSON structures with predictable shapes (see `docs/book/appendix-artifacts.md`) that implicitly encode types (integers for ports, strings for severity).
+`let` declarations, CLI overrides (`--var KEY=VALUE`), and module imports all share this literal syntax. Nested structures are resolved recursively, so complex configuration can remain in a single variable.
 
-## Validation Strategies
+## Literal Syntax Cheatsheet
 
-1. **Schema-driven linting** — Associate JSON Schema definitions with modules to validate variables and artifact transformations.
-2. **Type annotations** — Allow optional annotations (`let cidr: network = "10.0.0.0/24"`) to trigger compile-time validation once supported by the parser.
-3. **Capability declarations** — Specify allowable side effects (`scan discovery nmap!scanner`) to reason about required privileges.
+- Arrays and objects must close their brackets; trailing commas are not supported.
+- Object keys accept `[A-Za-z0-9_]+` or quoted strings (`"Content-Type"`).
+- Single or double quotes work interchangeably for string literals.
+- Numbers allow leading signs and decimal points; anything that fails numeric parsing becomes a string.
 
-## Planned Extensions
+## Interpolation Semantics
 
-- **Primitive type library**: Networks, hostnames, URIs, durations, severity levels.
-- **Collections**: Lists and maps with homogeneous element types for improved validation.
-- **Effect system**: Distinguish between passive data processing and active operations (network scanning, file modification) to aid risk assessment.
-- **Secret handling**: Introduce a `secret` type to ensure sensitive values are redacted from artifacts and logs.
+During execution the runtime holds variables in a `HashMap<String, LiteralValue>`. When a literal is interpolated inside a string (`${name}`):
 
-All future type features will prioritise backward compatibility by treating annotations as optional hints until tooling matures to enforce them.
+1. The variable is looked up after all prior `let` directives and overrides have resolved.
+2. Structured values are serialised: numbers retain their canonical representation, arrays and objects render as JSON.
+3. Missing variables trigger a runtime error.
+
+When variables are reused programmatically (e.g., expanding a list of scan targets) the executor operates on the underlying structured type instead of the string form. This enables steps to consume arrays or maps without manual parsing.
+
+## Collections in Practice
+
+```
+let scan_targets = ["192.0.2.10", "198.51.100.23"]
+let metadata = { owner: "blue", priority: 2, sensitive: false }
+```
+
+`scan_targets` remains an array throughout execution. Reports or scripts can inspect the list directly, and interpolating `${scan_targets}` inside text produces `["192.0.2.10","198.51.100.23"]`.
+
+## Roadmap
+
+Future releases will layer validation and annotations on top of the existing literal engine:
+
+1. **Schema-driven linting** to validate parameters before execution.
+2. **Optional type hints** (`let cidr: network = ...`) to guide tooling.
+3. **Secret-aware literals** that enforce redaction and safe storage.
+4. **Capability declarations** for effect tracking (network scans, file writes).
+
+These additions will remain backwards compatible by treating hints as opt-in metadata until full enforcement is available.

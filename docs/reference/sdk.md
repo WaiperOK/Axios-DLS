@@ -17,6 +17,18 @@ Axios SDKs enable external systems to consume artifacts, manage scenarios, and i
 | `schema`    | Provide JSON Schema definitions and helper validators.                |
 | `capabilities` | Describe required privileges and perform policy checks prior to execution. |
 
+### Built-in Tool Schemas
+
+`axion-core` exposes lightweight parameter schemas for first-party integrations. These are exercised automatically by `axion plan` and should also be consumed by SDK clients to provide consistent diagnostics.
+
+| Tool      | Required parameters       | Optional parameters           | Notes |
+|-----------|---------------------------|-------------------------------|-------|
+| `nmap`    | `target`                  | `flags`                       | Errors if `target` is empty or missing; additional keys trigger warnings. |
+| `gobuster`| `target`, `args`          | `flags`, `wordlist`, `mode`   | Ensures command arguments are provided; extra keys emit warnings. |
+| `script`  | `run`                     | `args`, `cwd`                 | Validates that `run` is non-empty and quoted correctly. |
+
+The SDK `schema` module will expose these definitions as serialisable metadata (e.g., JSON Schema) so external planners can extend or override behaviour while retaining compatibility with the CLI.
+
 ## Packaging Guidelines
 
 - SDKs must surface the artifact schema version to detect compatibility issues.

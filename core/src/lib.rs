@@ -1,6 +1,7 @@
 pub mod artifact;
 pub mod runtime;
 pub mod scenario;
+pub mod validation;
 
 pub use artifact::{
     ArtifactKind, Asset, AssetGroupArtifact, Finding, ReportArtifact, ScanArtifacts,
@@ -14,3 +15,4 @@ pub use scenario::{
     LiteralValue, ParseError, ReportStep, ReportSummary, ScanStep, ScanSummary, Scenario,
     ScenarioSummary, ScriptStep, ScriptSummary, Step, VariableDecl, VariableSummary,
 };
+pub use validation::{validate_scenario, Diagnostic, DiagnosticLevel};

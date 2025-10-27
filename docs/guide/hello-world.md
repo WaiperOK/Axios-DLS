@@ -32,12 +32,12 @@ EOF
 
 ## Directive Breakdown
 
-1. **Shebang** — Allows the scenario to be executed directly on Unix systems.
-2. **Variable** (`let greeting = ...`) — Demonstrates interpolation inside an asset group property.
-3. **Typed literals** � `let` now accepts numbers, booleans, arrays, and maps (e.g., `let targets = ["10.0.0.1", "10.0.0.2"]`, `let metadata = { owner: "blue", priority: 2 }`). Values remain available for interpolation inside strings and parameters.
+1. **Shebang** - Allows the scenario to be executed directly on Unix systems.
+2. **Variable** (`let greeting = ...`) - Demonstrates interpolation inside an asset group property.
+3. **Typed literals** - `let` accepts numbers, booleans, arrays, and maps (e.g., `let targets = ["10.0.0.1", "10.0.0.2"]`, `let metadata = { owner: "blue", priority: 2 }`). Values remain available for interpolation inside strings and parameters.
 4. **Asset Group** (`asset_group demo_hosts`) - Documents the scope in which the scenario operates. Properties are expressed as whitespace-delimited key and value.
 5. **Scan** (`scan banner nmap`) - Invokes `nmap -sn 192.0.2.10`. The closing `-> banner_scan` alias renames the resulting artifact.
-6. **Report** — Emits a JSON payload (and optional ASCII table) to standard output that includes `banner_scan`.
+6. **Report** - Emits a JSON payload (and optional ASCII table) to standard output that includes `banner_scan`.
 
 ## Execution
 
@@ -55,6 +55,7 @@ The optional `--var KEY=VALUE` flag overrides any `let` declaration at runtime; 
 - Modify the scan flags to collect service banners (`-sV`) and compare artifacts.
 - Add a `script` directive that parses the scan artifact and classifies exposed services.
 - Introduce additional reports (e.g., `report sarif`) once new backends are implemented.
+- Wrap sections in `if` conditions or use `for target in [...]` loops to fan out scans across multiple hosts.
 
 ## Cleanup
 
@@ -73,3 +74,5 @@ python tools/axion_repl.py
 ```
 
 Use `:help` to list commands; buffers accept the same syntax demonstrated above.
+
+

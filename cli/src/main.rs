@@ -1,7 +1,7 @@
 use anyhow::anyhow;
 use axion_core::{
-    parse_scenario, ExecutionOutcome, Executor, LiteralValue, Scenario, ScenarioSummary, Step,
-    StoredArtifact,
+    parse_scenario, validate_scenario, Diagnostic, DiagnosticLevel, ExecutionOutcome, Executor,
+    LiteralValue, Scenario, ScenarioSummary, Step, StoredArtifact,
 };
 use clap::{ArgAction, Parser, Subcommand};
 use serde_json::json;
@@ -49,8 +49,12 @@ fn main() -> anyhow::Result<()> {
         Command::Plan { input, json, vars } => {
             let scenario = load_scenario(&input)?;
             let overrides = parse_overrides(vars)?;
+            let diagnostics = validate_scenario(&scenario);
             let summary = scenario.summary();
-            output_plan(summary, json, &overrides)?;
+            let has_errors = output_plan(summary, &diagnostics, json, &overrides)?;
+            if has_errors {
+                anyhow::bail!("validation failed");
+            }
         }
         Command::Run { input, json, vars } => {
             let scenario = load_scenario(&input)?;
@@ -105,16 +109,24 @@ fn load_scenario_recursive(
 
 fn output_plan(
     summary: ScenarioSummary,
+    diagnostics: &[Diagnostic],
     json: bool,
     overrides: &HashMap<String, LiteralValue>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<bool> {
+    let has_errors = diagnostics.iter().any(Diagnostic::is_error);
+
     if json {
         let payload = json!({
             "summary": summary,
+            "diagnostics": diagnostics,
             "overrides": overrides,
         });
         println!("{}", serde_json::to_string_pretty(&payload)?);
     } else {
+        if !diagnostics.is_empty() {
+            print_diagnostics(diagnostics);
+        }
+
         println!("{summary}");
         if !overrides.is_empty() {
             println!("\nOverrides (--var):");
@@ -123,7 +135,8 @@ fn output_plan(
             }
         }
     }
-    Ok(())
+
+    Ok(has_errors)
 }
 
 fn output_run(
@@ -167,6 +180,25 @@ fn output_run(
         }
     }
     Ok(())
+}
+
+fn print_diagnostics(diagnostics: &[Diagnostic]) {
+    if diagnostics.is_empty() {
+        return;
+    }
+
+    println!("Diagnostics:");
+    for diagnostic in diagnostics {
+        let level = match diagnostic.level {
+            DiagnosticLevel::Error => "error",
+            DiagnosticLevel::Warning => "warn",
+        };
+        match &diagnostic.location {
+            Some(location) => println!("  - [{level}] {location}: {}", diagnostic.message),
+            None => println!("  - [{level}] {}", diagnostic.message),
+        }
+    }
+    println!();
 }
 
 fn parse_key_val(s: &str) -> Result<(String, String), String> {

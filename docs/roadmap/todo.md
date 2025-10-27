@@ -6,17 +6,17 @@ The following tasks are ordered by priority. Each section should be completed be
 - [x] Extend `let` to accept typed literals (string, number, boolean, list, map).
 - [x] Update parser to normalise literals into a type-aware AST.
 - [x] Allow step parameters to consume typed values (e.g., expand lists for scans, emit structured JSON).
-- [ ] Document type system, literal syntax, and interpolation semantics.
+- [x] Document type system, literal syntax, and interpolation semantics.
 
 ## 2. Control Flow (Conditions & Loops)
-- [ ] Introduce `if`/`else` constructs with boolean expressions.
-- [ ] Introduce `for` loops over lists (e.g., `for target in targets { ... }`).
-- [ ] Implement runtime execution model (branching, repeated steps).
-- [ ] Provide examples and guidance for conditional execution.
+- [x] Introduce `if`/`else` constructs with boolean expressions.
+- [x] Introduce `for` loops over lists (e.g., `for target in targets { ... }`).
+- [x] Implement runtime execution model (branching, repeated steps).
+- [x] Provide examples and guidance for conditional execution.
 
 ## 3. Tool SDK & Parameter Validation
-- [ ] Define declarative schemas for built-in tools (nmap, gobuster, script, etc.).
-- [ ] Validate parameters during `plan`, emit actionable diagnostics.
+- [x] Define declarative schemas for built-in tools (nmap, gobuster, script, etc.).
+- [x] Validate parameters during `plan`, emit actionable diagnostics.
 - [ ] Document the SDK format for third-party tool integrations.
 
 ## 4. Secrets Management
@@ -38,3 +38,5 @@ The following tasks are ordered by priority. Each section should be completed be
 - [ ] Export/import typed & control-flow enriched DSL.
 
 Maintain this file as the single source of truth for future development. Update status on completion of each bullet.***
+
+

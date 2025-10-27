@@ -4,9 +4,11 @@ The current runtime (`core/src/runtime.rs`) executes scenarios sequentially. Thi
 
 ## Present Implementation
 
-- **Executor**: Creates an `artifacts/` directory, iterates over steps, and dispatches to handler functions (`process_variable`, `process_asset_group`, `process_scan`, `process_script`, `process_report`).
-- **Variable Store**: `HashMap<String, String>` populated by `let` directives; used for interpolation.
+- **Executor**: Creates an `artifacts/` directory, iterates over steps, and dispatches to handler functions (`process_variable`, `process_asset_group`, `process_scan`, `process_script`, `process_conditional`, `process_loop`, `process_report`).
+- **Variable Store**: `HashMap<String, LiteralValue>` populated by `let` directives and CLI overrides; supports typed interpolation.
 - **Artifact Store**: `HashMap<String, StoredArtifact>` keyed by artifact name, enabling downstream steps to reference prior outputs.
+- **Control Flow**: `execute_steps` recurses into nested blocks, recording the outcome of conditions and the iteration count of loops.
+- **Validation**: `validate_scenario` enforces builtin tool schemas (e.g., `nmap` requires `target`) during planning.
 - **Reporting**: Generates `ExecutionReport` (status, messages) and returns artifacts to the CLI.
 - **Nmap Specialisation**: Parses XML output into structured findings, enabling tables and machine-readable reports.
 
@@ -41,3 +43,5 @@ Upgrades should be incremental:
 4. Expose gRPC/HTTP APIs for remote execution once stability is proven.
 
 These notes will evolve into formal ADRs as implementation work progresses.
+
+

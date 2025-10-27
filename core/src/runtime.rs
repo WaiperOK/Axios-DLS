@@ -2,8 +2,9 @@ use crate::artifact::{
     ArtifactKind, Asset, AssetGroupArtifact, Finding, ReportArtifact, ScanArtifacts,
     ScriptArtifact, StoredArtifact, TableArtifact,
 };
-use crate::{
-    AssetGroupStep, LiteralValue, ReportStep, ScanStep, Scenario, ScriptStep, Step, VariableDecl,
+use crate::scenario::{
+    AssetGroupStep, ConditionExpr, ConditionOperand, ConditionalStep, LiteralValue, LoopIterable,
+    LoopStep, ReportStep, ScanStep, Scenario, ScriptStep, Step, VariableDecl,
 };
 use comfy_table::{presets::ASCII_FULL, Table};
 use quick_xml::events::Event;
@@ -44,35 +45,160 @@ impl Executor {
         scenario: &Scenario,
         overrides: &HashMap<String, LiteralValue>,
     ) -> ExecutionOutcome {
-        let mut steps = Vec::new();
         let mut store: HashMap<String, StoredArtifact> = HashMap::new();
         let mut variables: HashMap<String, LiteralValue> = overrides.clone();
+        let mut report_steps = Vec::new();
 
-        for step in &scenario.steps {
-            if matches!(step, Step::Import(_)) {
-                continue;
-            }
-            let outcome = match step {
-                Step::Import(_) => unreachable!("import steps must be resolved before execution"),
-                Step::Variable(var) => self.process_variable(var, overrides, &mut variables),
-                Step::AssetGroup(group) => self.process_asset_group(group, &variables),
-                Step::Scan(scan) => self.process_scan(scan, &variables),
-                Step::Script(script) => self.process_script(script, &variables),
-                Step::Report(report) => self.process_report(report, &store, &variables),
-            };
-
-            if let Some(artifact) = outcome.artifact.clone() {
-                store.insert(artifact.name.clone(), artifact);
-            }
-
-            steps.push(outcome.execution);
-        }
+        self.execute_steps(
+            &scenario.steps,
+            overrides,
+            &mut variables,
+            &mut store,
+            &mut report_steps,
+        );
 
         let artifacts = store.into_values().collect();
 
         ExecutionOutcome {
-            report: ExecutionReport { steps },
+            report: ExecutionReport {
+                steps: report_steps,
+            },
             artifacts,
+        }
+    }
+
+    fn execute_steps(
+        &self,
+        steps: &[Step],
+        overrides: &HashMap<String, LiteralValue>,
+        variables: &mut HashMap<String, LiteralValue>,
+        store: &mut HashMap<String, StoredArtifact>,
+        report: &mut Vec<StepExecution>,
+    ) {
+        for step in steps {
+            match step {
+                Step::Import(_) => continue,
+                Step::Variable(var) => {
+                    let outcome = self.process_variable(var, overrides, variables);
+                    self.record_outcome(report, store, outcome);
+                }
+                Step::AssetGroup(group) => {
+                    let outcome = self.process_asset_group(group, variables);
+                    self.record_outcome(report, store, outcome);
+                }
+                Step::Scan(scan) => {
+                    let outcome = self.process_scan(scan, variables);
+                    self.record_outcome(report, store, outcome);
+                }
+                Step::Script(script) => {
+                    let outcome = self.process_script(script, variables);
+                    self.record_outcome(report, store, outcome);
+                }
+                Step::Report(report_step) => {
+                    let outcome = self.process_report(report_step, store, variables);
+                    self.record_outcome(report, store, outcome);
+                }
+                Step::Conditional(block) => {
+                    self.process_conditional(block, overrides, variables, store, report);
+                }
+                Step::Loop(loop_step) => {
+                    self.process_loop(loop_step, overrides, variables, store, report);
+                }
+            }
+        }
+    }
+
+    fn record_outcome(
+        &self,
+        report: &mut Vec<StepExecution>,
+        store: &mut HashMap<String, StoredArtifact>,
+        outcome: StepOutcome,
+    ) {
+        if let Some(artifact) = outcome.artifact {
+            store.insert(artifact.name.clone(), artifact);
+        }
+        report.push(outcome.execution);
+    }
+
+    fn process_conditional(
+        &self,
+        block: &ConditionalStep,
+        overrides: &HashMap<String, LiteralValue>,
+        variables: &mut HashMap<String, LiteralValue>,
+        store: &mut HashMap<String, StoredArtifact>,
+        report: &mut Vec<StepExecution>,
+    ) {
+        let condition_name = format!("if {}", block.condition);
+        match evaluate_condition(&block.condition, variables) {
+            Ok(result) => {
+                let outcome = StepOutcome::from_execution(StepExecution::completed(
+                    condition_name.clone(),
+                    StepKind::Conditional,
+                    Some(format!("condition evaluated to {result}")),
+                ));
+                self.record_outcome(report, store, outcome);
+
+                let branch = if result {
+                    &block.then_steps
+                } else {
+                    &block.else_steps
+                };
+                if !branch.is_empty() {
+                    self.execute_steps(branch, overrides, variables, store, report);
+                }
+            }
+            Err(err) => {
+                let outcome = StepOutcome::from_execution(StepExecution::failed(
+                    condition_name,
+                    StepKind::Conditional,
+                    Some(err),
+                ));
+                self.record_outcome(report, store, outcome);
+            }
+        }
+    }
+
+    fn process_loop(
+        &self,
+        loop_step: &LoopStep,
+        overrides: &HashMap<String, LiteralValue>,
+        variables: &mut HashMap<String, LiteralValue>,
+        store: &mut HashMap<String, StoredArtifact>,
+        report: &mut Vec<StepExecution>,
+    ) {
+        let loop_name = format!("for {} in {}", loop_step.iterator, loop_step.iterable);
+        match resolve_iterable(&loop_step.iterable, variables) {
+            Ok(items) => {
+                let previous = variables.get(&loop_step.iterator).cloned();
+                let mut iterations = 0usize;
+                for item in items {
+                    variables.insert(loop_step.iterator.clone(), item);
+                    iterations += 1;
+                    self.execute_steps(&loop_step.body, overrides, variables, store, report);
+                }
+                match previous {
+                    Some(value) => {
+                        variables.insert(loop_step.iterator.clone(), value);
+                    }
+                    None => {
+                        variables.remove(&loop_step.iterator);
+                    }
+                }
+                let outcome = StepOutcome::from_execution(StepExecution::completed(
+                    loop_name,
+                    StepKind::Loop,
+                    Some(format!("executed {iterations} iteration(s)")),
+                ));
+                self.record_outcome(report, store, outcome);
+            }
+            Err(err) => {
+                let outcome = StepOutcome::from_execution(StepExecution::failed(
+                    loop_name,
+                    StepKind::Loop,
+                    Some(err),
+                ));
+                self.record_outcome(report, store, outcome);
+            }
         }
     }
 
@@ -738,6 +864,8 @@ pub enum StepKind {
     Variable,
     Script,
     Report,
+    Conditional,
+    Loop,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -896,6 +1024,77 @@ fn substitute_variables(
 
     result.push_str(&value[cursor..]);
     Ok(result)
+}
+
+fn resolve_iterable(
+    iterable: &LoopIterable,
+    variables: &HashMap<String, LiteralValue>,
+) -> Result<Vec<LiteralValue>, String> {
+    match iterable {
+        LoopIterable::Variable(name) => match variables.get(name) {
+            Some(LiteralValue::Array(items)) => Ok(items.clone()),
+            Some(LiteralValue::String(value)) => Ok(vec![LiteralValue::String(value.clone())]),
+            Some(other) => Err(format!(
+                "variable '{}' is not iterable (found {})",
+                name,
+                other.display()
+            )),
+            None => Err(format!("undefined variable '{}'", name)),
+        },
+        LoopIterable::Literal(literal) => {
+            let resolved = resolve_literal_value(literal, variables)?;
+            match resolved {
+                LiteralValue::Array(items) => Ok(items),
+                LiteralValue::String(value) => Ok(vec![LiteralValue::String(value)]),
+                other => Err(format!(
+                    "loop iterable must be array or string, found {}",
+                    other.display()
+                )),
+            }
+        }
+    }
+}
+
+fn evaluate_condition(
+    expr: &ConditionExpr,
+    variables: &HashMap<String, LiteralValue>,
+) -> Result<bool, String> {
+    match expr {
+        ConditionExpr::Literal(value) => Ok(*value),
+        ConditionExpr::Variable(name) => match variables.get(name) {
+            Some(LiteralValue::Boolean(value)) => Ok(*value),
+            Some(other) => Err(format!(
+                "variable '{}' is not boolean (found {})",
+                name,
+                other.display()
+            )),
+            None => Err(format!("undefined variable '{}'", name)),
+        },
+        ConditionExpr::Not(inner) => Ok(!evaluate_condition(inner, variables)?),
+        ConditionExpr::Equals(left, right) => {
+            let lhs = evaluate_operand(left, variables)?;
+            let rhs = evaluate_operand(right, variables)?;
+            Ok(lhs == rhs)
+        }
+        ConditionExpr::NotEquals(left, right) => {
+            let lhs = evaluate_operand(left, variables)?;
+            let rhs = evaluate_operand(right, variables)?;
+            Ok(lhs != rhs)
+        }
+    }
+}
+
+fn evaluate_operand(
+    operand: &ConditionOperand,
+    variables: &HashMap<String, LiteralValue>,
+) -> Result<LiteralValue, String> {
+    match operand {
+        ConditionOperand::Variable(name) => variables
+            .get(name)
+            .cloned()
+            .ok_or_else(|| format!("undefined variable '{}'", name)),
+        ConditionOperand::Literal(value) => resolve_literal_value(value, variables),
+    }
 }
 
 fn build_table_from_scan(data: &Value) -> Option<TableArtifact> {

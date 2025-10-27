@@ -32,17 +32,41 @@ report stdout {
 
 | Directive      | Role                                                                 |
 |----------------|----------------------------------------------------------------------|
-| `let`          | Define string variables for later interpolation.                     |
+| `let`          | Define typed variables (string, number, boolean, array, object) for reuse and interpolation. |
 | `asset_group`  | Document assets, scopes, or metadata relevant to the assessment.     |
 | `scan`         | Execute reconnaissance tools; special handling provided for Nmap.    |
 | `script`       | Run arbitrary automation (exploitation scripts, enrichment tasks).   |
+| `if`           | Evaluate a boolean expression and execute steps conditionally (optional `else`). |
+| `for`          | Iterate over arrays or single values, binding each element to a loop variable. |
 | `report`       | Assemble artifacts into structured output for analysts.              |
 | `import`       | Compose scenarios by inlining external files.                        |
 
+## Control Flow Example
+
+```
+let targets = ["10.0.0.10", "10.0.0.11"]
+let scan_enabled = true
+
+if scan_enabled {
+  for host in targets {
+    scan host_sweep nmap {
+      flags -sV -Pn
+      target ${host}
+    } -> sweep_${host}
+  }
+} else {
+  report stdout {
+    include noop_warning
+  }
+}
+```
+
+The loop binds each address in `targets` to `host` before executing the nested `scan`. Any step (including additional `if` blocks or `let` declarations) can appear inside control-flow blocks.
+
 ## Composition Patterns
 
-- **Parameterised modules** — Encapsulate reusable logic in `.ax` files and expose required variables. Import them from scenario skeletons to adapt to new targets.
-- **Artifact chaining** — Use script directives to post-process scan artifacts and emit new data structures (e.g., severity classification). Reports can then include both the raw and enriched artifacts.
+- **Parameterised modules** - Encapsulate reusable logic in `.ax` files and expose required variables. Import them from scenario skeletons to adapt to new targets.
+- **Artifact chaining** - Use script directives to post-process scan artifacts and emit new data structures (e.g., severity classification). Reports can then include both the raw and enriched artifacts.
 - **Progressive enrichment** — Run fast scans first, feed results into targeted scripts, and consolidate everything via reports. Each stage remains auditable due to artifact retention.
 
 ## Versioning Philosophy
