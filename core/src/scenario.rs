@@ -17,6 +17,7 @@ pub enum Step {
     AssetGroup(AssetGroupStep),
     Scan(ScanStep),
     Variable(VariableDecl),
+    Secret(SecretStep),
     Script(ScriptStep),
     Report(ReportStep),
     Conditional(ConditionalStep),
@@ -53,6 +54,28 @@ pub struct ScriptStep {
 pub struct ReportStep {
     pub name: String,
     pub includes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SecretStep {
+    pub name: String,
+    pub source: SecretSource,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "provider", rename_all = "snake_case")]
+pub enum SecretSource {
+    Env {
+        mappings: BTreeMap<String, String>,
+    },
+    File {
+        path: String,
+    },
+    Vault {
+        path: String,
+        field: Option<String>,
+        namespace: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -159,6 +182,9 @@ where
     } else if first_line.starts_with("report ") {
         let step = parse_report(first_line, lines)?;
         Ok(Step::Report(step))
+    } else if first_line.starts_with("secret ") {
+        let step = parse_secret(first_line, lines)?;
+        Ok(Step::Secret(step))
     } else if first_line.starts_with("if ") {
         let step = parse_if(first_line, lines, imports)?;
         Ok(Step::Conditional(step))
@@ -393,6 +419,196 @@ where
         name: name.to_string(),
         includes,
     })
+}
+
+fn parse_secret<'a, I>(
+    first_line: &str,
+    lines: &mut PeekableLines<'a, I>,
+) -> Result<SecretStep, ParseError>
+where
+    I: Iterator<Item = (usize, &'a str)>,
+{
+    let mut inline_body = None;
+    let header = if let Ok((header, body)) = split_header_body(first_line) {
+        inline_body = body;
+        header.trim().to_string()
+    } else {
+        first_line.trim().trim_end_matches(';').to_string()
+    };
+
+    let rest = header
+        .strip_prefix("secret")
+        .ok_or_else(|| ParseError::InvalidSyntax(first_line.to_string()))?
+        .trim();
+    let (name_part, provider_part) = rest
+        .split_once(" from ")
+        .ok_or_else(|| ParseError::InvalidSyntax(first_line.to_string()))?;
+
+    let name = name_part.trim();
+    if name.is_empty() || !is_identifier(name) {
+        return Err(ParseError::InvalidSyntax(name.to_string()));
+    }
+
+    let mut tokens = provider_part.trim().splitn(2, char::is_whitespace);
+    let provider = tokens
+        .next()
+        .ok_or_else(|| ParseError::InvalidSyntax(first_line.to_string()))?
+        .trim();
+    let remainder = tokens.next().map(|v| v.trim()).unwrap_or("");
+
+    let source = match provider {
+        "env" => {
+            let entries = parse_secret_block_lines(inline_body, lines, "env")?;
+            let mappings = parse_secret_env(entries)?;
+            SecretSource::Env { mappings }
+        }
+        "file" => {
+            let path = if !remainder.is_empty() {
+                parse_secret_value(remainder)?
+            } else {
+                let entries = parse_secret_block_lines(inline_body, lines, "file")?;
+                if entries.len() != 1 {
+                    return Err(ParseError::InvalidSyntax(
+                        "file secret expects a single path".to_string(),
+                    ));
+                }
+                parse_secret_value(&entries[0])?
+            };
+            SecretSource::File { path }
+        }
+        "vault" => {
+            let entries = parse_secret_block_lines(inline_body, lines, "vault")?;
+            let params = parse_secret_map(entries)?;
+            let path = params
+                .get("path")
+                .cloned()
+                .ok_or_else(|| ParseError::MissingValue("vault.path"))?;
+            let field = params.get("field").cloned();
+            let namespace = params.get("namespace").cloned();
+            SecretSource::Vault {
+                path,
+                field,
+                namespace,
+            }
+        }
+        _ => {
+            return Err(ParseError::InvalidSyntax(format!(
+                "unsupported secret provider '{}'",
+                provider
+            )))
+        }
+    };
+
+    Ok(SecretStep {
+        name: name.to_string(),
+        source,
+    })
+}
+
+fn parse_secret_block_lines<'a, I>(
+    initial: Option<&str>,
+    lines: &mut PeekableLines<'a, I>,
+    kind: &str,
+) -> Result<Vec<String>, ParseError>
+where
+    I: Iterator<Item = (usize, &'a str)>,
+{
+    let mut entries = Vec::new();
+    if let Some(content) = initial {
+        let trimmed = content.trim();
+        if let Some((before, after)) = trimmed.split_once('}') {
+            if !before.trim().is_empty() {
+                entries.push(before.trim().to_string());
+            }
+            if !after.trim().is_empty() {
+                return Err(ParseError::InvalidSyntax(after.trim().to_string()));
+            }
+            return Ok(entries);
+        } else if !trimmed.is_empty() {
+            entries.push(trimmed.to_string());
+        }
+    }
+
+    loop {
+        let (_, raw_line) =
+            next_non_empty(lines).ok_or(ParseError::UnexpectedEof("secret block"))?;
+        let trimmed = raw_line.trim();
+        if trimmed.starts_with('}') {
+            if trimmed.len() > 1 && !trimmed[1..].trim().is_empty() {
+                return Err(ParseError::InvalidSyntax(trimmed[1..].trim().to_string()));
+            }
+            break;
+        }
+        if let Some(pos) = trimmed.find('}') {
+            let before = &trimmed[..pos];
+            if !before.trim().is_empty() {
+                entries.push(before.trim().to_string());
+            }
+            if !trimmed[pos + 1..].trim().is_empty() {
+                return Err(ParseError::InvalidSyntax(
+                    trimmed[pos + 1..].trim().to_string(),
+                ));
+            }
+            break;
+        } else {
+            if trimmed.is_empty() || trimmed.starts_with("//") || trimmed.starts_with('#') {
+                continue;
+            }
+            entries.push(trimmed.to_string());
+        }
+    }
+
+    if entries.is_empty() {
+        Err(ParseError::MissingValue(match kind {
+            "env" => "env mappings",
+            "vault" => "vault configuration",
+            _ => "secret value",
+        }))
+    } else {
+        Ok(entries)
+    }
+}
+
+fn parse_secret_env(entries: Vec<String>) -> Result<BTreeMap<String, String>, ParseError> {
+    let mut map = BTreeMap::new();
+    for entry in entries {
+        let mut parts = entry.splitn(2, char::is_whitespace);
+        let key = parts
+            .next()
+            .ok_or_else(|| ParseError::InvalidSyntax(entry.clone()))?;
+        let raw_value = parts
+            .next()
+            .ok_or_else(|| ParseError::InvalidSyntax(entry.clone()))?;
+        let value = parse_secret_value(raw_value)?;
+        map.insert(key.to_string(), value);
+    }
+    Ok(map)
+}
+
+fn parse_secret_map(entries: Vec<String>) -> Result<BTreeMap<String, String>, ParseError> {
+    let mut map = BTreeMap::new();
+    for entry in entries {
+        let mut parts = entry.splitn(2, char::is_whitespace);
+        let key = parts
+            .next()
+            .ok_or_else(|| ParseError::InvalidSyntax(entry.clone()))?;
+        let raw_value = parts
+            .next()
+            .ok_or_else(|| ParseError::InvalidSyntax(entry.clone()))?;
+        let value = parse_secret_value(raw_value)?;
+        map.insert(key.to_string(), value);
+    }
+    Ok(map)
+}
+
+fn parse_secret_value(value: &str) -> Result<String, ParseError> {
+    let trimmed = value.trim();
+    let without_equals = if let Some(stripped) = trimmed.strip_prefix('=') {
+        stripped.trim()
+    } else {
+        trimmed
+    };
+    parse_quoted(without_equals)
 }
 
 fn parse_if<'a, I>(
@@ -1035,6 +1251,7 @@ impl Scenario {
             total_steps: accumulator.total_steps,
             imports: import_list.into_iter().collect(),
             variables: accumulator.variables,
+            secrets: accumulator.secrets,
             asset_groups: accumulator.asset_groups,
             scans: accumulator.scans,
             scripts: accumulator.scripts,
@@ -1048,6 +1265,7 @@ pub struct ScenarioSummary {
     pub total_steps: usize,
     pub imports: Vec<String>,
     pub variables: Vec<VariableSummary>,
+    pub secrets: Vec<SecretSummary>,
     pub asset_groups: Vec<AssetGroupSummary>,
     pub scans: Vec<ScanSummary>,
     pub scripts: Vec<ScriptSummary>,
@@ -1086,10 +1304,17 @@ pub struct VariableSummary {
     pub value: LiteralValue,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SecretSummary {
+    pub name: String,
+    pub provider: String,
+}
+
 #[derive(Default)]
 struct SummaryAccumulator {
     total_steps: usize,
     variables: Vec<VariableSummary>,
+    secrets: Vec<SecretSummary>,
     asset_groups: Vec<AssetGroupSummary>,
     scans: Vec<ScanSummary>,
     scripts: Vec<ScriptSummary>,
@@ -1104,6 +1329,14 @@ fn collect_summary_steps(steps: &[Step], acc: &mut SummaryAccumulator) {
             Step::Variable(var) => acc.variables.push(VariableSummary {
                 name: var.name.clone(),
                 value: var.value.clone(),
+            }),
+            Step::Secret(secret) => acc.secrets.push(SecretSummary {
+                name: secret.name.clone(),
+                provider: match &secret.source {
+                    SecretSource::Env { .. } => "env".to_string(),
+                    SecretSource::File { .. } => "file".to_string(),
+                    SecretSource::Vault { .. } => "vault".to_string(),
+                },
             }),
             Step::AssetGroup(group) => acc.asset_groups.push(AssetGroupSummary {
                 name: group.name.clone(),
@@ -1190,5 +1423,54 @@ impl fmt::Display for ScenarioSummary {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_env_secret_block() {
+        let source = r#"
+secret db_creds from env {
+  username = "DB_USER"
+  password = "DB_PASS"
+}
+"#;
+        let scenario = parse_scenario(source).expect("failed to parse env secret");
+        assert_eq!(scenario.steps.len(), 1);
+
+        match &scenario.steps[0] {
+            Step::Secret(step) => {
+                assert_eq!(step.name, "db_creds");
+                match &step.source {
+                    SecretSource::Env { mappings } => {
+                        assert_eq!(mappings.get("username"), Some(&"DB_USER".to_string()));
+                        assert_eq!(mappings.get("password"), Some(&"DB_PASS".to_string()));
+                    }
+                    other => panic!("expected env secret, got {:?}", other),
+                }
+            }
+            other => panic!("expected secret step, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parses_inline_file_secret() {
+        let source = r#"secret api_key from file ".secrets/api.key""#;
+        let scenario = parse_scenario(source).expect("failed to parse file secret");
+        assert_eq!(scenario.steps.len(), 1);
+
+        match &scenario.steps[0] {
+            Step::Secret(step) => {
+                assert_eq!(step.name, "api_key");
+                match &step.source {
+                    SecretSource::File { path } => assert_eq!(path, ".secrets/api.key"),
+                    other => panic!("expected file secret, got {:?}", other),
+                }
+            }
+            other => panic!("expected secret step, got {:?}", other),
+        }
     }
 }

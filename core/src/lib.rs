@@ -15,4 +15,7 @@ pub use scenario::{
     LiteralValue, ParseError, ReportStep, ReportSummary, ScanStep, ScanSummary, Scenario,
     ScenarioSummary, ScriptStep, ScriptSummary, Step, VariableDecl, VariableSummary,
 };
-pub use validation::{validate_scenario, Diagnostic, DiagnosticLevel};
+pub use validation::{
+    builtin_tool_schema_bundle, builtin_tool_schemas, validate_scenario, Diagnostic,
+    DiagnosticLevel, ToolSchema, ToolSchemaBundle,
+};

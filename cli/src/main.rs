@@ -1,9 +1,11 @@
 use anyhow::anyhow;
 use axion_core::{
-    parse_scenario, validate_scenario, Diagnostic, DiagnosticLevel, ExecutionOutcome, Executor,
-    LiteralValue, Scenario, ScenarioSummary, Step, StoredArtifact,
+    builtin_tool_schema_bundle, parse_scenario, validate_scenario, Diagnostic, DiagnosticLevel,
+    ExecutionOutcome, Executor, LiteralValue, Scenario, ScenarioSummary, Step, StoredArtifact,
+    ToolSchema,
 };
-use clap::{ArgAction, Parser, Subcommand};
+use clap::{ArgAction, Parser, Subcommand, ValueEnum};
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -28,6 +30,9 @@ enum Command {
         /// Override a variable (format: key=value). Repeat for multiple overrides.
         #[arg(long = "var", value_parser = parse_key_val, value_name = "KEY=VALUE", action = ArgAction::Append)]
         vars: Vec<(String, String)>,
+        /// Override a secret (format: key=value). Repeat for multiple overrides.
+        #[arg(long = "secret", value_parser = parse_key_val, value_name = "KEY=VALUE", action = ArgAction::Append)]
+        secrets: Vec<(String, String)>,
     },
     /// Parse a scenario file and perform a dry-run (plan + placeholder execution)
     Run {
@@ -39,6 +44,18 @@ enum Command {
         /// Override a variable (format: key=value). Repeat for multiple overrides.
         #[arg(long = "var", value_parser = parse_key_val, value_name = "KEY=VALUE", action = ArgAction::Append)]
         vars: Vec<(String, String)>,
+        /// Override a secret (format: key=value). Repeat for multiple overrides.
+        #[arg(long = "secret", value_parser = parse_key_val, value_name = "KEY=VALUE", action = ArgAction::Append)]
+        secrets: Vec<(String, String)>,
+    },
+    /// Export builtin tool schemas
+    Schema {
+        /// Filter by tool name
+        #[arg(long)]
+        tool: Option<String>,
+        /// Output format
+        #[arg(long, default_value_t = SchemaFormat::Json)]
+        format: SchemaFormat,
     },
 }
 
@@ -46,23 +63,39 @@ fn main() -> anyhow::Result<()> {
     let cli = AxionCli::parse();
 
     match cli.command {
-        Command::Plan { input, json, vars } => {
+        Command::Plan {
+            input,
+            json,
+            vars,
+            secrets,
+        } => {
             let scenario = load_scenario(&input)?;
             let overrides = parse_overrides(vars)?;
+            let secret_overrides = parse_secret_overrides(secrets)?;
             let diagnostics = validate_scenario(&scenario);
             let summary = scenario.summary();
-            let has_errors = output_plan(summary, &diagnostics, json, &overrides)?;
+            let has_errors =
+                output_plan(summary, &diagnostics, json, &overrides, &secret_overrides)?;
             if has_errors {
                 anyhow::bail!("validation failed");
             }
         }
-        Command::Run { input, json, vars } => {
+        Command::Run {
+            input,
+            json,
+            vars,
+            secrets,
+        } => {
             let scenario = load_scenario(&input)?;
             let overrides = parse_overrides(vars)?;
+            let secret_overrides = parse_secret_overrides(secrets)?;
             let summary = scenario.summary();
             let executor = Executor::new();
-            let outcome = executor.execute_with_vars(&scenario, &overrides);
-            output_run(summary, outcome, json, &overrides)?;
+            let outcome = executor.execute_with_vars(&scenario, &overrides, &secret_overrides);
+            output_run(summary, outcome, json, &overrides, &secret_overrides)?;
+        }
+        Command::Schema { tool, format } => {
+            output_schema(tool, format)?;
         }
     }
 
@@ -112,14 +145,21 @@ fn output_plan(
     diagnostics: &[Diagnostic],
     json: bool,
     overrides: &HashMap<String, LiteralValue>,
+    secret_overrides: &HashMap<String, String>,
 ) -> anyhow::Result<bool> {
     let has_errors = diagnostics.iter().any(Diagnostic::is_error);
 
     if json {
+        let masked_secrets: HashMap<String, String> = secret_overrides
+            .keys()
+            .cloned()
+            .map(|key| (key, "***".to_string()))
+            .collect();
         let payload = json!({
             "summary": summary,
             "diagnostics": diagnostics,
             "overrides": overrides,
+            "secrets": masked_secrets,
         });
         println!("{}", serde_json::to_string_pretty(&payload)?);
     } else {
@@ -134,6 +174,14 @@ fn output_plan(
                 println!("  - {} = {}", key, value);
             }
         }
+        if !secret_overrides.is_empty() {
+            println!("\nSecrets (--secret):");
+            let mut keys: Vec<&String> = secret_overrides.keys().collect();
+            keys.sort();
+            for key in keys {
+                println!("  - {} = ***", key);
+            }
+        }
     }
 
     Ok(has_errors)
@@ -144,13 +192,20 @@ fn output_run(
     outcome: ExecutionOutcome,
     json: bool,
     overrides: &HashMap<String, LiteralValue>,
+    secret_overrides: &HashMap<String, String>,
 ) -> anyhow::Result<()> {
     if json {
+        let masked_secrets: HashMap<String, String> = secret_overrides
+            .keys()
+            .cloned()
+            .map(|key| (key, "***".to_string()))
+            .collect();
         let payload = json!({
             "summary": summary,
             "execution": outcome.report,
             "artifacts": outcome.artifacts,
             "overrides": overrides,
+            "secrets": masked_secrets,
         });
         println!("{}", serde_json::to_string_pretty(&payload)?);
     } else {
@@ -159,6 +214,15 @@ fn output_run(
             println!("Overrides (--var):");
             for (key, value) in overrides {
                 println!("  - {} = {}", key, value);
+            }
+            println!();
+        }
+        if !secret_overrides.is_empty() {
+            println!("Secrets (--secret):");
+            let mut keys: Vec<&String> = secret_overrides.keys().collect();
+            keys.sort();
+            for key in keys {
+                println!("  - {} = ***", key);
             }
             println!();
         }
@@ -179,6 +243,59 @@ fn output_run(
             }
         }
     }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum SchemaFormat {
+    Json,
+    Yaml,
+}
+
+impl std::fmt::Display for SchemaFormat {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let value = match self {
+            SchemaFormat::Json => "json",
+            SchemaFormat::Yaml => "yaml",
+        };
+        write!(f, "{value}")
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct SchemaResponse {
+    version: String,
+    generated_at: String,
+    tools: Vec<ToolSchema>,
+}
+
+fn output_schema(tool: Option<String>, format: SchemaFormat) -> anyhow::Result<()> {
+    let bundle = builtin_tool_schema_bundle();
+    let mut tools = bundle.tools;
+
+    if let Some(filter) = tool {
+        tools.retain(|schema| schema.name == filter);
+        if tools.is_empty() {
+            anyhow::bail!("unknown tool '{filter}'");
+        }
+    }
+
+    let response = SchemaResponse {
+        version: bundle.version,
+        generated_at: bundle.generated_at,
+        tools,
+    };
+
+    match format {
+        SchemaFormat::Json => {
+            println!("{}", serde_json::to_string_pretty(&response)?);
+        }
+        SchemaFormat::Yaml => {
+            let yaml = serde_yaml::to_string(&response)?;
+            print!("{yaml}");
+        }
+    }
+
     Ok(())
 }
 
@@ -215,6 +332,16 @@ fn parse_overrides(vars: Vec<(String, String)>) -> anyhow::Result<HashMap<String
         let literal = axion_core::parse_literal_expression(&raw)
             .map_err(|err| anyhow!("invalid override {key}: {err}"))?;
         map.insert(key, literal);
+    }
+    Ok(map)
+}
+
+fn parse_secret_overrides(
+    secrets: Vec<(String, String)>,
+) -> anyhow::Result<HashMap<String, String>> {
+    let mut map = HashMap::new();
+    for (key, value) in secrets {
+        map.insert(key, value);
     }
     Ok(map)
 }

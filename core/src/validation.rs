@@ -1,8 +1,10 @@
 use crate::scenario::{
-    LiteralValue, LoopIterable, LoopStep, ReportStep, ScanStep, Scenario, ScriptStep, Step,
+    LiteralValue, LoopIterable, LoopStep, ReportStep, ScanStep, Scenario, ScriptStep, SecretSource,
+    SecretStep, Step,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
+use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -44,6 +46,47 @@ pub fn validate_scenario(scenario: &Scenario) -> Vec<Diagnostic> {
     let mut ctx = ValidationContext::new();
     validate_steps(&scenario.steps, &mut ctx);
     ctx.finish()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolSchema {
+    pub name: String,
+    pub kind: Option<String>,
+    pub description: Option<String>,
+    pub required: Vec<String>,
+    pub optional: Vec<String>,
+    pub allow_additional: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolSchemaBundle {
+    pub version: String,
+    pub generated_at: String,
+    pub tools: Vec<ToolSchema>,
+}
+
+pub fn builtin_tool_schemas() -> Vec<ToolSchema> {
+    BUILTIN_SCHEMAS
+        .iter()
+        .map(|schema| ToolSchema {
+            name: schema.name.to_string(),
+            kind: Some(schema.kind.to_string()),
+            description: Some(schema.description.to_string()),
+            required: schema.required.iter().map(|s| (*s).to_string()).collect(),
+            optional: schema.optional.iter().map(|s| (*s).to_string()).collect(),
+            allow_additional: schema.allow_additional,
+        })
+        .collect()
+}
+
+pub fn builtin_tool_schema_bundle() -> ToolSchemaBundle {
+    ToolSchemaBundle {
+        version: SCHEMA_VERSION.to_string(),
+        generated_at: OffsetDateTime::now_utc()
+            .format(&Rfc3339)
+            .unwrap_or_else(|_| "unknown".to_string()),
+        tools: builtin_tool_schemas(),
+    }
 }
 
 struct ValidationContext {
@@ -95,6 +138,11 @@ fn validate_steps(steps: &[Step], ctx: &mut ValidationContext) {
         match step {
             Step::Import(_) => {}
             Step::Variable(_) => {}
+            Step::Secret(secret) => {
+                ctx.push(format!("secret {}", secret.name));
+                validate_secret(secret, ctx);
+                ctx.pop();
+            }
             Step::AssetGroup(group) => {
                 ctx.push(format!("asset_group {}", group.name));
                 // Asset group properties are free-form.
@@ -138,42 +186,63 @@ fn validate_steps(steps: &[Step], ctx: &mut ValidationContext) {
 
 fn validate_scan(scan: &ScanStep, ctx: &mut ValidationContext) {
     let params = &scan.params;
-    match scan.tool.as_str() {
-        "nmap" => validate_with_schema("nmap", params, &NMAP_SCHEMA, ctx),
-        "gobuster" => {
-            validate_with_schema("gobuster", params, &GOBUSTER_SCHEMA, ctx);
-            if let Some(args) = params.get("args") {
-                if args.trim().is_empty() {
-                    ctx.error("parameter 'args' cannot be empty for tool 'gobuster'");
+    if let Some(schema) = lookup_schema(scan.tool.as_str()) {
+        validate_with_schema(&scan.tool, params, schema, ctx);
+    } else {
+        if let Some(value) = params.get("target") {
+            if value.trim().is_empty() {
+                ctx.error("parameter 'target' cannot be empty");
+            }
+        } else {
+            ctx.warning("parameter 'target' is not set; scans may rely on tool defaults");
+        }
+        enforce_known(params, &["target", "flags", "args", "cwd"], ctx, &scan.tool);
+    }
+}
+
+fn validate_secret(secret: &SecretStep, ctx: &mut ValidationContext) {
+    if secret.name.trim().is_empty() {
+        ctx.error("secret name cannot be empty");
+    }
+
+    match &secret.source {
+        SecretSource::Env { mappings } => {
+            if mappings.is_empty() {
+                ctx.error("env secret requires at least one mapping");
+            }
+            for (alias, env_key) in mappings {
+                if alias.trim().is_empty() {
+                    ctx.error("env secret mapping name cannot be empty");
+                }
+                if env_key.trim().is_empty() {
+                    ctx.error(format!(
+                        "env secret mapping '{}' references an empty variable name",
+                        alias
+                    ));
                 }
             }
         }
-        tool => {
-            if let Some(value) = params.get("target") {
-                if value.trim().is_empty() {
-                    ctx.error("parameter 'target' cannot be empty");
-                }
-            } else {
-                ctx.warning("parameter 'target' is not set; scans may rely on tool defaults");
+        SecretSource::File { path } => {
+            if path.trim().is_empty() {
+                ctx.error("file secret path cannot be empty");
             }
-            enforce_known(params, &["target", "flags", "args", "cwd"], ctx, tool);
+        }
+        SecretSource::Vault { path, .. } => {
+            if path.trim().is_empty() {
+                ctx.error("vault secret requires a path");
+            }
+            ctx.warning(
+                "vault provider is not implemented yet; this step will be skipped at runtime",
+            );
         }
     }
 }
 
 fn validate_script(script: &ScriptStep, ctx: &mut ValidationContext) {
     let params = &script.params;
-    match params.get("run") {
-        Some(value) if value.trim().is_empty() => {
-            ctx.error("parameter 'run' cannot be empty");
-        }
-        Some(_) => {}
-        None => {
-            // Parser already enforces this, but guard against future changes.
-            ctx.error("missing required parameter 'run'");
-        }
+    if let Some(schema) = lookup_schema("script") {
+        validate_with_schema("script", params, schema, ctx);
     }
-    enforce_known(params, &["run", "args", "cwd"], ctx, "script");
 }
 
 fn validate_report(report: &ReportStep, ctx: &mut ValidationContext) {
@@ -233,42 +302,81 @@ fn enforce_known(
         }
     }
 }
-
-#[derive(Clone, Copy)]
-struct ToolSchema {
+struct ToolSchemaDef {
+    name: &'static str,
+    kind: &'static str,
+    description: &'static str,
     required: &'static [&'static str],
     optional: &'static [&'static str],
     allow_additional: bool,
 }
 
-impl ToolSchema {
+impl ToolSchemaDef {
     fn allows(&self, key: &str) -> bool {
         self.required
             .iter()
             .chain(self.optional.iter())
-            .any(|k| *k == key)
+            .any(|candidate| *candidate == key)
     }
 }
 
-const NMAP_SCHEMA: ToolSchema = ToolSchema {
-    required: &["target"],
-    optional: &["flags"],
-    allow_additional: false,
-};
+const BUILTIN_SCHEMAS: &[ToolSchemaDef] = &[
+    ToolSchemaDef {
+        name: "nmap",
+        kind: "scan",
+        description: "Nmap TCP/UDP scanner",
+        required: &["target"],
+        optional: &["flags"],
+        allow_additional: false,
+    },
+    ToolSchemaDef {
+        name: "gobuster",
+        kind: "scan",
+        description: "Gobuster content discovery",
+        required: &["target", "args"],
+        optional: &["flags", "wordlist", "mode"],
+        allow_additional: false,
+    },
+    ToolSchemaDef {
+        name: "script",
+        kind: "script",
+        description: "Generic script execution",
+        required: &["run"],
+        optional: &["args", "cwd"],
+        allow_additional: false,
+    },
+];
 
-const GOBUSTER_SCHEMA: ToolSchema = ToolSchema {
-    required: &["target", "args"],
-    optional: &["flags", "wordlist", "mode"],
-    allow_additional: false,
-};
+const SCHEMA_VERSION: &str = "1.0.0";
+
+fn lookup_schema(tool: &str) -> Option<&'static ToolSchemaDef> {
+    BUILTIN_SCHEMAS.iter().find(|schema| schema.name == tool)
+}
 
 fn validate_with_schema(
     tool: &str,
     params: &BTreeMap<String, String>,
-    schema: &ToolSchema,
+    schema: &ToolSchemaDef,
     ctx: &mut ValidationContext,
 ) {
     check_required(params, schema.required, ctx, tool);
+
+    if let Some(value) = params.get("args") {
+        if tool == "gobuster" && value.trim().is_empty() {
+            ctx.error("parameter 'args' cannot be empty for tool 'gobuster'");
+        }
+    }
+    if let Some(value) = params.get("target") {
+        if value.trim().is_empty() {
+            ctx.error("parameter 'target' cannot be empty");
+        }
+    }
+    if let Some(value) = params.get("run") {
+        if tool == "script" && value.trim().is_empty() {
+            ctx.error("parameter 'run' cannot be empty");
+        }
+    }
+
     if !schema.allow_additional {
         for key in params.keys() {
             if !schema.allows(key) {

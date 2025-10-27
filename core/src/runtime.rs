@@ -4,7 +4,8 @@ use crate::artifact::{
 };
 use crate::scenario::{
     AssetGroupStep, ConditionExpr, ConditionOperand, ConditionalStep, LiteralValue, LoopIterable,
-    LoopStep, ReportStep, ScanStep, Scenario, ScriptStep, Step, VariableDecl,
+    LoopStep, ReportStep, ScanStep, Scenario, ScriptStep, SecretSource, SecretStep, Step,
+    VariableDecl,
 };
 use comfy_table::{presets::ASCII_FULL, Table};
 use quick_xml::events::Event;
@@ -12,7 +13,8 @@ use quick_xml::name::QName;
 use quick_xml::Reader;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::env;
 use std::fmt;
 use std::fs;
 use std::io::Write;
@@ -26,6 +28,49 @@ pub struct Executor {
     artifacts_dir: PathBuf,
 }
 
+#[derive(Debug, Default)]
+struct SecretStore {
+    values: HashMap<String, String>,
+    usage: HashSet<String>,
+}
+
+impl SecretStore {
+    fn insert(&mut self, key: impl Into<String>, value: impl Into<String>) {
+        let key = key.into();
+        let value = value.into();
+        self.values.entry(key).or_insert(value);
+    }
+
+    fn set(&mut self, key: impl Into<String>, value: impl Into<String>) {
+        let key = key.into();
+        let value = value.into();
+        self.values.insert(key, value);
+    }
+
+    fn resolve(&mut self, key: &str) -> Option<String> {
+        if let Some(value) = self.values.get(key) {
+            self.usage.insert(key.to_string());
+            Some(value.clone())
+        } else {
+            None
+        }
+    }
+
+    fn peek(&self, key: &str) -> Option<&str> {
+        self.values.get(key).map(|value| value.as_str())
+    }
+
+    fn mask(&self, input: &str) -> String {
+        let mut masked = input.to_string();
+        for value in self.values.values() {
+            if !value.is_empty() {
+                masked = masked.replace(value, "***");
+            }
+        }
+        masked
+    }
+}
+
 impl Executor {
     pub fn new() -> Self {
         let artifacts_dir = PathBuf::from("artifacts");
@@ -36,18 +81,25 @@ impl Executor {
     }
 
     pub fn execute(&self, scenario: &Scenario) -> ExecutionOutcome {
-        let empty = HashMap::new();
-        self.execute_with_vars(scenario, &empty)
+        let empty_vars = HashMap::new();
+        let empty_secrets = HashMap::new();
+        self.execute_with_vars(scenario, &empty_vars, &empty_secrets)
     }
 
     pub fn execute_with_vars(
         &self,
         scenario: &Scenario,
         overrides: &HashMap<String, LiteralValue>,
+        secret_overrides: &HashMap<String, String>,
     ) -> ExecutionOutcome {
         let mut store: HashMap<String, StoredArtifact> = HashMap::new();
         let mut variables: HashMap<String, LiteralValue> = overrides.clone();
         let mut report_steps = Vec::new();
+        let mut secrets = SecretStore::default();
+
+        for (key, value) in secret_overrides {
+            secrets.set(key.clone(), value.clone());
+        }
 
         self.execute_steps(
             &scenario.steps,
@@ -55,6 +107,7 @@ impl Executor {
             &mut variables,
             &mut store,
             &mut report_steps,
+            &mut secrets,
         );
 
         let artifacts = store.into_values().collect();
@@ -74,35 +127,40 @@ impl Executor {
         variables: &mut HashMap<String, LiteralValue>,
         store: &mut HashMap<String, StoredArtifact>,
         report: &mut Vec<StepExecution>,
+        secrets: &mut SecretStore,
     ) {
         for step in steps {
             match step {
                 Step::Import(_) => continue,
                 Step::Variable(var) => {
-                    let outcome = self.process_variable(var, overrides, variables);
-                    self.record_outcome(report, store, outcome);
+                    let outcome = self.process_variable(var, overrides, variables, secrets);
+                    self.record_outcome(report, store, secrets, outcome);
                 }
                 Step::AssetGroup(group) => {
-                    let outcome = self.process_asset_group(group, variables);
-                    self.record_outcome(report, store, outcome);
+                    let outcome = self.process_asset_group(group, variables, secrets);
+                    self.record_outcome(report, store, secrets, outcome);
                 }
                 Step::Scan(scan) => {
-                    let outcome = self.process_scan(scan, variables);
-                    self.record_outcome(report, store, outcome);
+                    let outcome = self.process_scan(scan, variables, secrets);
+                    self.record_outcome(report, store, secrets, outcome);
                 }
                 Step::Script(script) => {
-                    let outcome = self.process_script(script, variables);
-                    self.record_outcome(report, store, outcome);
+                    let outcome = self.process_script(script, variables, secrets);
+                    self.record_outcome(report, store, secrets, outcome);
                 }
                 Step::Report(report_step) => {
-                    let outcome = self.process_report(report_step, store, variables);
-                    self.record_outcome(report, store, outcome);
+                    let outcome = self.process_report(report_step, store, variables, secrets);
+                    self.record_outcome(report, store, secrets, outcome);
+                }
+                Step::Secret(secret_step) => {
+                    let outcome = self.process_secret(secret_step, secrets);
+                    self.record_outcome(report, store, secrets, outcome);
                 }
                 Step::Conditional(block) => {
-                    self.process_conditional(block, overrides, variables, store, report);
+                    self.process_conditional(block, overrides, variables, store, report, secrets);
                 }
                 Step::Loop(loop_step) => {
-                    self.process_loop(loop_step, overrides, variables, store, report);
+                    self.process_loop(loop_step, overrides, variables, store, report, secrets);
                 }
             }
         }
@@ -112,10 +170,14 @@ impl Executor {
         &self,
         report: &mut Vec<StepExecution>,
         store: &mut HashMap<String, StoredArtifact>,
-        outcome: StepOutcome,
+        secrets: &SecretStore,
+        mut outcome: StepOutcome,
     ) {
         if let Some(artifact) = outcome.artifact {
             store.insert(artifact.name.clone(), artifact);
+        }
+        if let Some(message) = outcome.execution.message.take() {
+            outcome.execution.message = Some(secrets.mask(&message));
         }
         report.push(outcome.execution);
     }
@@ -127,16 +189,17 @@ impl Executor {
         variables: &mut HashMap<String, LiteralValue>,
         store: &mut HashMap<String, StoredArtifact>,
         report: &mut Vec<StepExecution>,
+        secrets: &mut SecretStore,
     ) {
         let condition_name = format!("if {}", block.condition);
-        match evaluate_condition(&block.condition, variables) {
+        match evaluate_condition(&block.condition, variables, secrets) {
             Ok(result) => {
                 let outcome = StepOutcome::from_execution(StepExecution::completed(
                     condition_name.clone(),
                     StepKind::Conditional,
                     Some(format!("condition evaluated to {result}")),
                 ));
-                self.record_outcome(report, store, outcome);
+                self.record_outcome(report, store, secrets, outcome);
 
                 let branch = if result {
                     &block.then_steps
@@ -144,7 +207,7 @@ impl Executor {
                     &block.else_steps
                 };
                 if !branch.is_empty() {
-                    self.execute_steps(branch, overrides, variables, store, report);
+                    self.execute_steps(branch, overrides, variables, store, report, secrets);
                 }
             }
             Err(err) => {
@@ -153,7 +216,7 @@ impl Executor {
                     StepKind::Conditional,
                     Some(err),
                 ));
-                self.record_outcome(report, store, outcome);
+                self.record_outcome(report, store, secrets, outcome);
             }
         }
     }
@@ -165,16 +228,24 @@ impl Executor {
         variables: &mut HashMap<String, LiteralValue>,
         store: &mut HashMap<String, StoredArtifact>,
         report: &mut Vec<StepExecution>,
+        secrets: &mut SecretStore,
     ) {
         let loop_name = format!("for {} in {}", loop_step.iterator, loop_step.iterable);
-        match resolve_iterable(&loop_step.iterable, variables) {
+        match resolve_iterable(&loop_step.iterable, variables, secrets) {
             Ok(items) => {
                 let previous = variables.get(&loop_step.iterator).cloned();
                 let mut iterations = 0usize;
                 for item in items {
                     variables.insert(loop_step.iterator.clone(), item);
                     iterations += 1;
-                    self.execute_steps(&loop_step.body, overrides, variables, store, report);
+                    self.execute_steps(
+                        &loop_step.body,
+                        overrides,
+                        variables,
+                        store,
+                        report,
+                        secrets,
+                    );
                 }
                 match previous {
                     Some(value) => {
@@ -189,7 +260,7 @@ impl Executor {
                     StepKind::Loop,
                     Some(format!("executed {iterations} iteration(s)")),
                 ));
-                self.record_outcome(report, store, outcome);
+                self.record_outcome(report, store, secrets, outcome);
             }
             Err(err) => {
                 let outcome = StepOutcome::from_execution(StepExecution::failed(
@@ -197,7 +268,7 @@ impl Executor {
                     StepKind::Loop,
                     Some(err),
                 ));
-                self.record_outcome(report, store, outcome);
+                self.record_outcome(report, store, secrets, outcome);
             }
         }
     }
@@ -326,8 +397,9 @@ impl Executor {
         &self,
         script: &ScriptStep,
         variables: &HashMap<String, LiteralValue>,
+        secrets: &mut SecretStore,
     ) -> StepOutcome {
-        let params = match resolve_map(&script.params, variables) {
+        let params = match resolve_map(&script.params, variables, secrets) {
             Ok(map) => map,
             Err(err) => {
                 return StepOutcome::from_execution(StepExecution::failed(
@@ -464,9 +536,10 @@ impl Executor {
         variable: &VariableDecl,
         overrides: &HashMap<String, LiteralValue>,
         variables: &mut HashMap<String, LiteralValue>,
+        secrets: &mut SecretStore,
     ) -> StepOutcome {
         let (resolved, note) = if let Some(raw) = overrides.get(&variable.name) {
-            match resolve_literal_value(raw, variables) {
+            match resolve_literal_value(raw, variables, secrets) {
                 Ok(value) => (value, Some("(override)")),
                 Err(err) => {
                     return StepOutcome::from_execution(StepExecution::failed(
@@ -477,7 +550,7 @@ impl Executor {
                 }
             }
         } else {
-            match resolve_literal_value(&variable.value, variables) {
+            match resolve_literal_value(&variable.value, variables, secrets) {
                 Ok(value) => (value, None),
                 Err(err) => {
                     return StepOutcome::from_execution(StepExecution::failed(
@@ -503,12 +576,90 @@ impl Executor {
         ))
     }
 
+    fn process_secret(&self, secret: &SecretStep, secrets: &mut SecretStore) -> StepOutcome {
+        match &secret.source {
+            SecretSource::Env { mappings } => {
+                let mut aggregated: BTreeMap<String, String> = BTreeMap::new();
+
+                for (alias, env_key) in mappings {
+                    let scoped = format!("{}.{}", secret.name, alias);
+                    if let Some(existing) = secrets.peek(&scoped) {
+                        aggregated.insert(alias.clone(), existing.to_string());
+                        continue;
+                    }
+
+                    match env::var(env_key) {
+                        Ok(value) => {
+                            secrets.insert(scoped, value.clone());
+                            aggregated.insert(alias.clone(), value);
+                        }
+                        Err(err) => {
+                            return StepOutcome::from_execution(StepExecution::failed(
+                                secret.name.clone(),
+                                StepKind::Secret,
+                                Some(format!(
+                                    "failed to read environment variable {}: {err}",
+                                    env_key
+                                )),
+                            ))
+                        }
+                    }
+                }
+
+                if aggregated.len() == 1 {
+                    if let Some((_, value)) = aggregated.iter().next() {
+                        secrets.insert(secret.name.clone(), value.clone());
+                    }
+                }
+
+                let count = aggregated.len();
+                let message = if count == 1 {
+                    format!("secret '{}' loaded from env (1 value)", secret.name)
+                } else {
+                    format!(
+                        "secret '{}' loaded from env ({} values)",
+                        secret.name, count
+                    )
+                };
+
+                StepOutcome::from_execution(StepExecution::completed(
+                    secret.name.clone(),
+                    StepKind::Secret,
+                    Some(message),
+                ))
+            }
+            SecretSource::File { path } => match fs::read_to_string(path) {
+                Ok(value) => {
+                    secrets.insert(secret.name.clone(), value);
+                    StepOutcome::from_execution(StepExecution::completed(
+                        secret.name.clone(),
+                        StepKind::Secret,
+                        Some(format!("secret '{}' loaded from file", secret.name)),
+                    ))
+                }
+                Err(err) => StepOutcome::from_execution(StepExecution::failed(
+                    secret.name.clone(),
+                    StepKind::Secret,
+                    Some(format!("failed to read file {}: {err}", path)),
+                )),
+            },
+            SecretSource::Vault { .. } => {
+                StepOutcome::from_execution(StepExecution::not_implemented(
+                    secret.name.clone(),
+                    StepKind::Secret,
+                    Some("vault provider is not implemented yet".to_string()),
+                ))
+            }
+        }
+    }
+
     fn process_asset_group(
         &self,
         group: &AssetGroupStep,
         variables: &HashMap<String, LiteralValue>,
+        secrets: &mut SecretStore,
     ) -> StepOutcome {
-        let resolved = match resolve_map(&group.properties, variables) {
+        let resolved = match resolve_map(&group.properties, variables, secrets) {
             Ok(map) => map,
             Err(err) => {
                 return StepOutcome::from_execution(StepExecution::failed(
@@ -544,8 +695,9 @@ impl Executor {
         &self,
         scan: &ScanStep,
         variables: &HashMap<String, LiteralValue>,
+        secrets: &mut SecretStore,
     ) -> StepOutcome {
-        let params = match resolve_map(&scan.params, variables) {
+        let params = match resolve_map(&scan.params, variables, secrets) {
             Ok(map) => map,
             Err(err) => {
                 return StepOutcome::from_execution(StepExecution::failed(
@@ -663,8 +815,9 @@ impl Executor {
         report: &ReportStep,
         store: &HashMap<String, StoredArtifact>,
         variables: &HashMap<String, LiteralValue>,
+        secrets: &mut SecretStore,
     ) -> StepOutcome {
-        let include_names = match resolve_list(&report.includes, variables) {
+        let include_names = match resolve_list(&report.includes, variables, secrets) {
             Ok(list) => list,
             Err(err) => {
                 return StepOutcome::from_execution(StepExecution::failed(
@@ -862,6 +1015,7 @@ pub enum StepKind {
     AssetGroup,
     Scan,
     Variable,
+    Secret,
     Script,
     Report,
     Conditional,
@@ -927,10 +1081,11 @@ fn truncate_output(bytes: &[u8]) -> String {
 fn resolve_literal_value(
     value: &LiteralValue,
     variables: &HashMap<String, LiteralValue>,
+    secrets: &mut SecretStore,
 ) -> Result<LiteralValue, String> {
     match value {
         LiteralValue::String(s) => {
-            let substituted = substitute_variables(s, variables)?;
+            let substituted = substitute_variables(s, variables, secrets)?;
             Ok(LiteralValue::String(substituted))
         }
         LiteralValue::Number(n) => Ok(LiteralValue::Number(*n)),
@@ -938,14 +1093,14 @@ fn resolve_literal_value(
         LiteralValue::Array(items) => {
             let mut resolved = Vec::with_capacity(items.len());
             for item in items {
-                resolved.push(resolve_literal_value(item, variables)?);
+                resolved.push(resolve_literal_value(item, variables, secrets)?);
             }
             Ok(LiteralValue::Array(resolved))
         }
         LiteralValue::Object(map) => {
             let mut resolved = BTreeMap::new();
             for (k, v) in map {
-                resolved.insert(k.clone(), resolve_literal_value(v, variables)?);
+                resolved.insert(k.clone(), resolve_literal_value(v, variables, secrets)?);
             }
             Ok(LiteralValue::Object(resolved))
         }
@@ -972,10 +1127,11 @@ fn sanitize_label(label: &str) -> String {
 fn resolve_map(
     source: &BTreeMap<String, String>,
     variables: &HashMap<String, LiteralValue>,
+    secrets: &mut SecretStore,
 ) -> Result<BTreeMap<String, String>, String> {
     let mut resolved = BTreeMap::new();
     for (key, value) in source {
-        let substituted = substitute_variables(value, variables)?;
+        let substituted = substitute_variables(value, variables, secrets)?;
         resolved.insert(key.clone(), substituted);
     }
     Ok(resolved)
@@ -984,10 +1140,11 @@ fn resolve_map(
 fn resolve_list(
     items: &[String],
     variables: &HashMap<String, LiteralValue>,
+    secrets: &mut SecretStore,
 ) -> Result<Vec<String>, String> {
     let mut resolved = Vec::with_capacity(items.len());
     for item in items {
-        let substituted = substitute_variables(item, variables)?;
+        let substituted = substitute_variables(item, variables, secrets)?;
         resolved.push(substituted);
     }
     Ok(resolved)
@@ -996,6 +1153,7 @@ fn resolve_list(
 fn substitute_variables(
     value: &str,
     variables: &HashMap<String, LiteralValue>,
+    secrets: &mut SecretStore,
 ) -> Result<String, String> {
     let mut result = String::with_capacity(value.len());
     let mut cursor = 0;
@@ -1009,16 +1167,27 @@ fn substitute_variables(
             .find('}')
             .ok_or_else(|| "unterminated variable placeholder".to_string())?;
         let end_idx = start_idx + 2 + end_offset;
-        let name = remainder[..end_offset].trim();
+        let token = remainder[..end_offset].trim();
 
-        if name.is_empty() {
+        if token.is_empty() {
             return Err("empty variable placeholder".to_string());
         }
 
-        let replacement = variables
-            .get(name)
-            .ok_or_else(|| format!("undefined variable '{name}'"))?;
-        result.push_str(&literal_to_string(replacement));
+        if let Some(secret_name) = token.strip_prefix("secret:") {
+            let key = secret_name.trim();
+            if key.is_empty() {
+                return Err("empty secret placeholder".to_string());
+            }
+            let resolved = secrets
+                .resolve(key)
+                .ok_or_else(|| format!("undefined secret '{key}'"))?;
+            result.push_str(&resolved);
+        } else {
+            let replacement = variables
+                .get(token)
+                .ok_or_else(|| format!("undefined variable '{token}'"))?;
+            result.push_str(&literal_to_string(replacement));
+        }
         cursor = end_idx + 1;
     }
 
@@ -1029,6 +1198,7 @@ fn substitute_variables(
 fn resolve_iterable(
     iterable: &LoopIterable,
     variables: &HashMap<String, LiteralValue>,
+    secrets: &mut SecretStore,
 ) -> Result<Vec<LiteralValue>, String> {
     match iterable {
         LoopIterable::Variable(name) => match variables.get(name) {
@@ -1042,7 +1212,7 @@ fn resolve_iterable(
             None => Err(format!("undefined variable '{}'", name)),
         },
         LoopIterable::Literal(literal) => {
-            let resolved = resolve_literal_value(literal, variables)?;
+            let resolved = resolve_literal_value(literal, variables, secrets)?;
             match resolved {
                 LiteralValue::Array(items) => Ok(items),
                 LiteralValue::String(value) => Ok(vec![LiteralValue::String(value)]),
@@ -1058,6 +1228,7 @@ fn resolve_iterable(
 fn evaluate_condition(
     expr: &ConditionExpr,
     variables: &HashMap<String, LiteralValue>,
+    secrets: &mut SecretStore,
 ) -> Result<bool, String> {
     match expr {
         ConditionExpr::Literal(value) => Ok(*value),
@@ -1070,15 +1241,15 @@ fn evaluate_condition(
             )),
             None => Err(format!("undefined variable '{}'", name)),
         },
-        ConditionExpr::Not(inner) => Ok(!evaluate_condition(inner, variables)?),
+        ConditionExpr::Not(inner) => Ok(!evaluate_condition(inner, variables, secrets)?),
         ConditionExpr::Equals(left, right) => {
-            let lhs = evaluate_operand(left, variables)?;
-            let rhs = evaluate_operand(right, variables)?;
+            let lhs = evaluate_operand(left, variables, secrets)?;
+            let rhs = evaluate_operand(right, variables, secrets)?;
             Ok(lhs == rhs)
         }
         ConditionExpr::NotEquals(left, right) => {
-            let lhs = evaluate_operand(left, variables)?;
-            let rhs = evaluate_operand(right, variables)?;
+            let lhs = evaluate_operand(left, variables, secrets)?;
+            let rhs = evaluate_operand(right, variables, secrets)?;
             Ok(lhs != rhs)
         }
     }
@@ -1087,13 +1258,14 @@ fn evaluate_condition(
 fn evaluate_operand(
     operand: &ConditionOperand,
     variables: &HashMap<String, LiteralValue>,
+    secrets: &mut SecretStore,
 ) -> Result<LiteralValue, String> {
     match operand {
         ConditionOperand::Variable(name) => variables
             .get(name)
             .cloned()
             .ok_or_else(|| format!("undefined variable '{}'", name)),
-        ConditionOperand::Literal(value) => resolve_literal_value(value, variables),
+        ConditionOperand::Literal(value) => resolve_literal_value(value, variables, secrets),
     }
 }
 
@@ -1405,4 +1577,93 @@ struct PortBuilder {
     protocol: Option<String>,
     state: Option<String>,
     service: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    #[test]
+    fn resolves_secret_placeholders_and_masks_messages() {
+        let env_key = "AXION_TEST_SECRET_VALUE";
+        std::env::set_var(env_key, "super-secret-token");
+
+        let source = format!(
+            r#"
+secret api from env {{
+  token = "{env_key}"
+}}
+
+let header = "Bearer ${{secret:api.token}}"
+"#
+        );
+
+        let scenario = crate::scenario::parse_scenario(&source).expect("failed to parse scenario");
+        let executor = Executor::new();
+        let overrides = HashMap::new();
+        let secret_overrides = HashMap::new();
+        let outcome = executor.execute_with_vars(&scenario, &overrides, &secret_overrides);
+
+        let secret_step = outcome
+            .report
+            .steps
+            .iter()
+            .find(|step| step.name == "api")
+            .expect("secret step present");
+        assert_eq!(secret_step.status, ExecutionStatus::Completed);
+
+        let variable_step = outcome
+            .report
+            .steps
+            .iter()
+            .find(|step| step.name == "header")
+            .expect("variable step present");
+        assert_eq!(variable_step.status, ExecutionStatus::Completed);
+        let message = variable_step.message.as_deref().unwrap_or_default();
+        assert!(message.contains("Bearer ***"));
+        assert!(!message.contains("super-secret-token"));
+
+        std::env::remove_var(env_key);
+    }
+
+    #[test]
+    fn secret_override_allows_missing_env() {
+        let source = r#"
+secret token from env {
+  value = "AXION_TEST_MISSING_ENV"
+}
+
+let captured = "${secret:token.value}"
+"#;
+
+        std::env::remove_var("AXION_TEST_MISSING_ENV");
+
+        let scenario = crate::scenario::parse_scenario(source).expect("failed to parse scenario");
+        let executor = Executor::new();
+        let overrides = HashMap::new();
+        let mut secret_overrides = HashMap::new();
+        secret_overrides.insert("token.value".to_string(), "override-secret".to_string());
+
+        let outcome = executor.execute_with_vars(&scenario, &overrides, &secret_overrides);
+
+        let secret_step = outcome
+            .report
+            .steps
+            .iter()
+            .find(|step| step.name == "token")
+            .expect("secret step present");
+        assert_eq!(secret_step.status, ExecutionStatus::Completed);
+
+        let variable_step = outcome
+            .report
+            .steps
+            .iter()
+            .find(|step| step.name == "captured")
+            .expect("variable step present");
+        assert_eq!(variable_step.status, ExecutionStatus::Completed);
+        let message = variable_step.message.as_deref().unwrap_or_default();
+        assert!(message.contains("***"));
+        assert!(!message.contains("override-secret"));
+    }
 }

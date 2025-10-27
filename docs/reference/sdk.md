@@ -27,6 +27,8 @@ Axios SDKs enable external systems to consume artifacts, manage scenarios, and i
 | `gobuster`| `target`, `args`          | `flags`, `wordlist`, `mode`   | Ensures command arguments are provided; extra keys emit warnings. |
 | `script`  | `run`                     | `args`, `cwd`                 | Validates that `run` is non-empty and quoted correctly. |
 
+The `axion_core::builtin_tool_schemas()` function returns these definitions (serialised with Serde) so SDK clients can hydrate them into JSON Schema or other validation frameworks.
+
 The SDK `schema` module will expose these definitions as serialisable metadata (e.g., JSON Schema) so external planners can extend or override behaviour while retaining compatibility with the CLI.
 
 ## Packaging Guidelines
@@ -43,3 +45,10 @@ The SDK `schema` module will expose these definitions as serialisable metadata (
 4. Document examples showcasing integration with CI pipelines, dashboards, and vulnerability management systems.
 
 Updates to the SDKs will be tracked in dedicated changelogs and aligned with the main project versioning scheme.
+
+
+### UI Integration Notes
+
+- The React prototype under `ui/` can load schema data by running `axion schema --format json` during build/startup and caching the resulting bundle (e.g., place it under `src/assets/tool-schemas.json`).
+- Watch for updates: the bundle carries a `version` field; regenerate when it changes or on CLI upgrades.
+- For live editing, invoke the CLI programmatically via a dev server or call `axion_core::builtin_tool_schema_bundle()` from a Rust backend.

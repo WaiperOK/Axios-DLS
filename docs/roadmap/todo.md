@@ -17,7 +17,7 @@ The following tasks are ordered by priority. Each section should be completed be
 ## 3. Tool SDK & Parameter Validation
 - [x] Define declarative schemas for built-in tools (nmap, gobuster, script, etc.).
 - [x] Validate parameters during `plan`, emit actionable diagnostics.
-- [ ] Document the SDK format for third-party tool integrations.
+- [x] Document the SDK format for third-party tool integrations.
 
 ## 4. Secrets Management
 - [ ] Support secrets blocks (e.g., `.env`, external vaults).
@@ -38,5 +38,6 @@ The following tasks are ordered by priority. Each section should be completed be
 - [ ] Export/import typed & control-flow enriched DSL.
 
 Maintain this file as the single source of truth for future development. Update status on completion of each bullet.***
+
 
 
