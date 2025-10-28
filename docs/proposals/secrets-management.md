@@ -13,7 +13,14 @@
 2. Ops team executes scenarios in CI and injects secrets via environment variables without editing source files.
 3. Integration with HashiCorp Vault or other secret stores to fetch credentials at runtime.
 
-## Proposed DSL Additions
+## Current Status
+
+- Parser, runtime, and CLI support `secret` blocks for `env` and `file` providers (shipping in `axion-core`).
+- `${secret:name}` interpolation resolves against an in-memory store and is masked in execution output.
+- The CLI exposes `--secret key=value` overrides for ad-hoc injection (e.g., CI pipelines).
+- Vault integration remains on the roadmap and is not yet implemented.
+
+## DSL Additions
 
 ### Secret Blocks
 
@@ -37,7 +44,7 @@ secret vault_token from vault {
 
 Secrets become available via `${secret:name}` expressions (distinct from `${var}`) and are resolved lazily.
 
-## Runtime Handling
+## Runtime Handling (Implemented)
 
 - Extend executor with a SecretStore that holds decrypted values in memory only.
 - Secrets never persisted to artifact JSON or stdout; masking applied to execution logs.
@@ -57,14 +64,14 @@ Secrets become available via `${secret:name}` expressions (distinct from `${var}
 
 ## CLI / SDK Impact
 
-- `axion plan` warns if secret definitions are missing required sources or referenced but undefined.
+- `axion plan` warns if secret definitions are missing required sources or referenced but undefined (implemented).
 - `axion schema` to expose secret providers metadata (so IDE can offer UI for secret wiring).
 - SDK: expose `SecretDescriptor { name, provider, parameters }` via `axion_core` for UI consumption.
 
 ## Incremental Implementation Plan
 
-1. Parser/AST: add SecretStep with provider metadata.
-2. Runtime: introduce SecretStore, env/file providers, masking in logging.
-3. CLI overrides & plan diagnostics for secrets.
-4. Optional: Vault provider integration.
-5. Documentation: update security guide, quickstart, roadmap.
+1. Parser/AST: add SecretStep with provider metadata. (done)
+2. Runtime: introduce SecretStore, env/file providers, masking in logging. (done)
+3. CLI overrides & plan diagnostics for secrets. (done)
+4. Optional: Vault provider integration. (pending)
+5. Documentation: update security guide, quickstart, roadmap. (done)

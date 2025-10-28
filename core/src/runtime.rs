@@ -4,8 +4,8 @@ use crate::artifact::{
 };
 use crate::scenario::{
     AssetGroupStep, ConditionExpr, ConditionOperand, ConditionalStep, LiteralValue, LoopIterable,
-    LoopStep, ReportStep, ScanStep, Scenario, ScriptStep, SecretSource, SecretStep, Step,
-    VariableDecl,
+    LoopStep, ReportFormat, ReportStep, ScanStep, Scenario, ScriptStep, SecretSource, SecretStep,
+    Step, VariableDecl,
 };
 use comfy_table::{presets::ASCII_FULL, Table};
 use quick_xml::events::Event;
@@ -854,48 +854,115 @@ impl Executor {
         let generated_at = OffsetDateTime::now_utc()
             .format(&time::format_description::well_known::Rfc3339)
             .unwrap_or_else(|_| "unknown".to_string());
-        let tables_for_display = tables.clone();
-        let report_data = json!(ReportArtifact {
-            target: report.name.clone(),
-            generated_at,
-            includes,
-            tables,
-        });
-
         let report_label = format!("report:{}", report.name);
-        let path = self
-            .write_artifact(&sanitize_label(&report_label), &report_data)
-            .map(|p| p.to_string_lossy().to_string());
 
-        if report.name == "stdout" {
-            if let Ok(pretty) = serde_json::to_string_pretty(&report_data) {
-                println!("{pretty}");
+        let options = match resolve_map(&report.options, variables, secrets) {
+            Ok(map) => map,
+            Err(err) => {
+                return StepOutcome::from_execution(StepExecution::failed(
+                    report.name.clone(),
+                    StepKind::Report,
+                    Some(format!("failed to resolve report options: {err}")),
+                ))
             }
-            for (alias, table) in &tables_for_display {
-                if table.rows.is_empty() {
-                    continue;
+        };
+
+        let display_title = options
+            .get("title")
+            .cloned()
+            .unwrap_or_else(|| report.name.clone());
+
+        match report.format {
+            ReportFormat::Stdout => {
+                let report_data = json!(ReportArtifact {
+                    target: report.name.clone(),
+                    format: report.format.as_str().to_string(),
+                    generated_at: generated_at.clone(),
+                    includes: includes.clone(),
+                    tables: tables.clone(),
+                    output_path: None::<String>,
+                    options: options.clone(),
+                });
+
+                let path = self
+                    .write_artifact(&report_label, &report_data)
+                    .map(|p| p.to_string_lossy().to_string());
+
+                if let Ok(pretty) = serde_json::to_string_pretty(&report_data) {
+                    println!("{pretty}");
                 }
-                println!("\n[table] {alias}");
-                let rendered = render_table(table);
-                println!("{rendered}");
+                for (alias, table) in &tables {
+                    if table.rows.is_empty() {
+                        continue;
+                    }
+                    println!("\n[table] {alias}");
+                    let rendered = render_table(table);
+                    println!("{rendered}");
+                }
+
+                let message = format!(
+                    "report generated for target '{}'. artifact: {}",
+                    report.name,
+                    path.clone().unwrap_or_else(|| "<memory>".to_string())
+                );
+
+                StepOutcome::with_artifact(
+                    StepExecution::completed(report.name.clone(), StepKind::Report, Some(message)),
+                    StoredArtifact {
+                        name: report_label,
+                        kind: ArtifactKind::Report,
+                        path,
+                        data: report_data,
+                    },
+                )
+            }
+            ReportFormat::Html => {
+                let html = render_html_report(&display_title, &generated_at, &includes, &tables);
+                self.write_file_report(
+                    report,
+                    "html",
+                    html,
+                    includes.clone(),
+                    tables.clone(),
+                    options.clone(),
+                    generated_at.clone(),
+                    report_label,
+                )
+            }
+            ReportFormat::Markdown => {
+                let markdown =
+                    render_markdown_report(&display_title, &generated_at, &includes, &tables);
+                self.write_file_report(
+                    report,
+                    "md",
+                    markdown,
+                    includes.clone(),
+                    tables.clone(),
+                    options.clone(),
+                    generated_at.clone(),
+                    report_label,
+                )
+            }
+            ReportFormat::Sarif => {
+                match render_sarif_report(&display_title, &generated_at, &includes, &options) {
+                    Ok(payload) => self.write_file_report(
+                        report,
+                        "sarif",
+                        payload,
+                        includes.clone(),
+                        tables.clone(),
+                        options.clone(),
+                        generated_at.clone(),
+                        report_label,
+                    ),
+                    Err(err) => StepOutcome::from_execution(StepExecution::failed(
+                        report.name.clone(),
+                        StepKind::Report,
+                        Some(err),
+                    )),
+                }
             }
         }
-
-        let message = format!(
-            "report generated for target '{}'. artifact: {}",
-            report.name,
-            path.clone().unwrap_or_else(|| "<memory>".to_string())
-        );
-
-        StepOutcome::with_artifact(
-            StepExecution::completed(report.name.clone(), StepKind::Report, Some(message)),
-            StoredArtifact {
-                name: report_label,
-                kind: ArtifactKind::Report,
-                path,
-                data: report_data,
-            },
-        )
     }
 
     fn write_artifact(&self, label: &str, data: &Value) -> Option<PathBuf> {
@@ -931,6 +998,87 @@ impl Executor {
                 eprintln!("[warn] failed to serialize artifact '{}': {err}", label);
                 None
             }
+        }
+    }
+
+    fn write_file_report(
+        &self,
+        report: &ReportStep,
+        extension: &str,
+        contents: String,
+        includes: BTreeMap<String, Value>,
+        tables: BTreeMap<String, TableArtifact>,
+        options: BTreeMap<String, String>,
+        generated_at: String,
+        report_label: String,
+    ) -> StepOutcome {
+        match self.write_report_file(report, extension, &contents) {
+            Ok(path_buf) => {
+                let path_string = path_buf.to_string_lossy().to_string();
+                let report_data = json!(ReportArtifact {
+                    target: report.name.clone(),
+                    format: report.format.as_str().to_string(),
+                    generated_at,
+                    includes,
+                    tables,
+                    output_path: Some(path_string.clone()),
+                    options,
+                });
+                let message = format!(
+                    "{} report written to {}",
+                    report.format.as_str(),
+                    path_string
+                );
+                StepOutcome::with_artifact(
+                    StepExecution::completed(report.name.clone(), StepKind::Report, Some(message)),
+                    StoredArtifact {
+                        name: report_label,
+                        kind: ArtifactKind::Report,
+                        path: Some(path_string),
+                        data: report_data,
+                    },
+                )
+            }
+            Err(err) => StepOutcome::from_execution(StepExecution::failed(
+                report.name.clone(),
+                StepKind::Report,
+                Some(format!("failed to write {} report: {err}", extension)),
+            )),
+        }
+    }
+
+    fn write_report_file(
+        &self,
+        report: &ReportStep,
+        extension: &str,
+        contents: &str,
+    ) -> Result<PathBuf, String> {
+        let path = self.resolve_report_path(report, extension);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|err| format!("failed to create report directory {:?}: {err}", parent))?;
+        }
+        let mut file = fs::File::create(&path)
+            .map_err(|err| format!("failed to create report file {:?}: {err}", path))?;
+        file.write_all(contents.as_bytes())
+            .map_err(|err| format!("failed to write report file {:?}: {err}", path))?;
+        Ok(path)
+    }
+
+    fn resolve_report_path(&self, report: &ReportStep, extension: &str) -> PathBuf {
+        if let Some(custom) = &report.output {
+            let candidate = PathBuf::from(custom);
+            if candidate.is_absolute() {
+                candidate
+            } else {
+                self.artifacts_dir.join(candidate)
+            }
+        } else {
+            self.artifacts_dir.join("reports").join(format!(
+                "{}.{}",
+                sanitize_label(&report.name),
+                extension
+            ))
         }
     }
 }
@@ -1322,6 +1470,324 @@ fn build_table_from_scan(data: &Value) -> Option<TableArtifact> {
     Some(TableArtifact { columns, rows })
 }
 
+fn render_html_report(
+    title: &str,
+    generated_at: &str,
+    includes: &BTreeMap<String, Value>,
+    tables: &BTreeMap<String, TableArtifact>,
+) -> String {
+    let mut html = String::new();
+    html.push_str("<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\" />\n");
+    html.push_str("<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />\n");
+    html.push_str(&format!(
+        "<title>Axion Report – {}</title>\n",
+        escape_html(title)
+    ));
+    html.push_str("<style>");
+    html.push_str(
+        "body{font-family:system-ui,-apple-system,\"Segoe UI\",sans-serif;background:#0f172a;color:#e2e8f0;margin:0;padding:0;}\
+        header{background:#1e293b;padding:24px 32px;border-bottom:1px solid rgba(148,163,184,0.2);}\
+        h1{margin:0;font-size:28px;}\
+        h2{margin-top:32px;margin-bottom:12px;font-size:22px;}\
+        main{padding:32px;}\
+        section{margin-bottom:40px;background:#111c34;padding:24px;border-radius:12px;border:1px solid rgba(148,163,184,0.1);}\
+        table{width:100%;border-collapse:collapse;margin-top:16px;font-size:14px;}\
+        th,td{border:1px solid rgba(148,163,184,0.2);padding:8px 10px;text-align:left;}\
+        th{background:#1e293b;font-weight:600;}\
+        tr:nth-child(even){background:rgba(148,163,184,0.05);}\
+        code,pre{font-family:\"Fira Code\",Consolas,monospace;background:#0b1120;color:#f8fafc;border-radius:8px;}\
+        pre{padding:16px;overflow:auto;}\
+        details{margin-top:16px;}\
+        details>summary{cursor:pointer;color:#38bdf8;font-weight:600;}\
+        footer{padding:16px 32px;border-top:1px solid rgba(148,163,184,0.2);color:#94a3b8;font-size:13px;}",
+    );
+    html.push_str("</style>\n</head>\n<body>\n");
+    html.push_str("<header>");
+    html.push_str(&format!("<h1>Axion Report: {}</h1>", escape_html(title)));
+    html.push_str(&format!(
+        "<p>Generated at {}</p>",
+        escape_html(generated_at)
+    ));
+    html.push_str("</header>\n<main>\n");
+
+    for (name, value) in includes {
+        html.push_str("<section>");
+        html.push_str(&format!("<h2>{}</h2>", escape_html(name)));
+        if let Some(table) = tables.get(name) {
+            html.push_str(&render_html_table(table));
+        }
+        if let Ok(raw) = serde_json::to_string_pretty(value) {
+            html.push_str("<details><summary>Raw JSON</summary>");
+            html.push_str("<pre><code>");
+            html.push_str(&escape_html(&raw));
+            html.push_str("</code></pre></details>");
+        }
+        html.push_str("</section>\n");
+    }
+
+    if includes.is_empty() {
+        html.push_str("<section><p>No artifacts were included in this report.</p></section>");
+    }
+
+    html.push_str("</main>\n<footer>Generated by axion-core</footer>\n</body>\n</html>");
+    html
+}
+
+fn render_html_table(table: &TableArtifact) -> String {
+    let mut html = String::new();
+    html.push_str("<table>");
+    html.push_str("<thead><tr>");
+    for column in &table.columns {
+        html.push_str(&format!("<th>{}</th>", escape_html(column)));
+    }
+    html.push_str("</tr></thead>");
+    html.push_str("<tbody>");
+    for row in &table.rows {
+        html.push_str("<tr>");
+        for column in &table.columns {
+            let value = value_to_string(row.get(column));
+            html.push_str(&format!("<td>{}</td>", escape_html(&value)));
+        }
+        html.push_str("</tr>");
+    }
+    html.push_str("</tbody></table>");
+    html
+}
+
+fn render_markdown_report(
+    title: &str,
+    generated_at: &str,
+    includes: &BTreeMap<String, Value>,
+    tables: &BTreeMap<String, TableArtifact>,
+) -> String {
+    let mut md = String::new();
+    md.push_str("# Axion Report\n\n");
+    md.push_str(&format!("**Title:** {}\n\n", title));
+    md.push_str(&format!("_Generated at {}_\n\n", generated_at));
+
+    if includes.is_empty() {
+        md.push_str("No artifacts were included in this report.\n");
+        return md;
+    }
+
+    for (name, value) in includes {
+        md.push_str(&format!("## {}\n\n", name));
+        if let Some(table) = tables.get(name) {
+            if !table.columns.is_empty() {
+                md.push_str(&render_markdown_table(table));
+                md.push('\n');
+            }
+        }
+        if let Ok(raw) = serde_json::to_string_pretty(value) {
+            md.push_str("```json\n");
+            md.push_str(&raw);
+            md.push_str("\n```\n\n");
+        }
+    }
+
+    md
+}
+
+fn render_markdown_table(table: &TableArtifact) -> String {
+    let mut md = String::new();
+    md.push('|');
+    for column in &table.columns {
+        md.push(' ');
+        md.push_str(&sanitize_markdown_cell(column));
+        md.push_str(" |");
+    }
+    md.push('\n');
+
+    md.push('|');
+    for _ in &table.columns {
+        md.push_str(" --- |");
+    }
+    md.push('\n');
+
+    for row in &table.rows {
+        md.push('|');
+        for column in &table.columns {
+            let value = value_to_string(row.get(column));
+            md.push(' ');
+            md.push_str(&sanitize_markdown_cell(&value));
+            md.push_str(" |");
+        }
+        md.push('\n');
+    }
+
+    md
+}
+
+fn sanitize_markdown_cell(value: &str) -> String {
+    let replaced = value.replace('\n', "<br>");
+    replaced.replace('|', "\\|")
+}
+
+fn render_sarif_report(
+    title: &str,
+    generated_at: &str,
+    includes: &BTreeMap<String, Value>,
+    options: &BTreeMap<String, String>,
+) -> Result<String, String> {
+    let tool_name = options
+        .get("tool_name")
+        .or_else(|| options.get("tool"))
+        .cloned()
+        .unwrap_or_else(|| "Axion".to_string());
+    let tool_version = options.get("tool_version").cloned();
+    let tool_uri = options.get("tool_uri").cloned();
+    let min_rank = options
+        .get("severity_threshold")
+        .map(|value| severity_rank(value))
+        .unwrap_or(0);
+
+    let mut results = Vec::new();
+    let mut rules: BTreeMap<String, Value> = BTreeMap::new();
+    let mut artifacts = Vec::new();
+    let mut artifact_ids = HashSet::new();
+
+    for value in includes.values() {
+        let scan: ScanArtifacts = match serde_json::from_value(value.clone()) {
+            Ok(scan) => scan,
+            Err(_) => continue,
+        };
+
+        rules.entry(scan.tool.clone()).or_insert_with(|| {
+            json!({
+                "id": scan.tool,
+                "name": scan.tool,
+                "shortDescription": {
+                    "text": format!("Findings emitted by {}", scan.tool)
+                }
+            })
+        });
+
+        for finding in scan.findings {
+            let rank = severity_rank(&finding.severity);
+            if rank < min_rank {
+                continue;
+            }
+
+            if artifact_ids.insert(finding.asset_id.clone()) {
+                artifacts.push(json!({
+                    "location": {
+                        "uri": finding.asset_id
+                    }
+                }));
+            }
+
+            let level = sarif_level(&finding.severity);
+            let mut properties = serde_json::Map::new();
+            properties.insert("severity".to_string(), json!(finding.severity));
+            properties.insert("service".to_string(), json!(finding.service));
+            properties.insert("state".to_string(), json!(finding.state));
+            properties.insert("protocol".to_string(), json!(finding.protocol));
+            properties.insert("port".to_string(), json!(finding.port));
+            properties.insert("target".to_string(), json!(scan.target));
+            properties.insert("description".to_string(), json!(finding.description));
+            properties.insert("evidence".to_string(), json!(finding.evidence));
+
+            results.push(json!({
+                "ruleId": scan.tool,
+                "level": level,
+                "message": {
+                    "text": finding.title
+                },
+                "locations": [{
+                    "physicalLocation": {
+                        "artifactLocation": {
+                            "uri": finding.asset_id
+                        }
+                    }
+                }],
+                "properties": properties
+            }));
+        }
+    }
+
+    let mut driver = serde_json::Map::new();
+    driver.insert("name".to_string(), json!(tool_name));
+    if let Some(version) = tool_version {
+        driver.insert("version".to_string(), json!(version));
+    }
+    if let Some(uri) = tool_uri {
+        driver.insert("informationUri".to_string(), json!(uri));
+    }
+    if !rules.is_empty() {
+        driver.insert(
+            "rules".to_string(),
+            json!(rules.into_values().collect::<Vec<_>>()),
+        );
+    }
+
+    let mut run = serde_json::Map::new();
+    run.insert("tool".to_string(), json!({ "driver": driver }));
+    run.insert("results".to_string(), json!(results));
+    if !artifacts.is_empty() {
+        run.insert("artifacts".to_string(), json!(artifacts));
+    }
+    run.insert(
+        "invocations".to_string(),
+        json!([{
+            "executionSuccessful": true,
+            "endTimeUtc": generated_at
+        }]),
+    );
+    run.insert(
+        "automationDetails".to_string(),
+        json!({
+            "id": format!("axion::{}", title),
+            "description": {
+                "text": format!("Axion SARIF report {}", title)
+            }
+        }),
+    );
+
+    let sarif = json!({
+        "version": "2.1.0",
+        "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
+        "runs": [run]
+    });
+
+    serde_json::to_string_pretty(&sarif).map_err(|err| err.to_string())
+}
+
+fn severity_rank(label: &str) -> u8 {
+    match label.to_lowercase().as_str() {
+        "critical" => 4,
+        "high" => 3,
+        "medium" => 2,
+        "moderate" => 2,
+        "low" => 1,
+        "informational" | "info" | "note" => 0,
+        _ => 0,
+    }
+}
+
+fn sarif_level(label: &str) -> &'static str {
+    match label.to_lowercase().as_str() {
+        "critical" | "high" => "error",
+        "medium" | "moderate" => "warning",
+        "low" | "informational" | "info" => "note",
+        _ => "note",
+    }
+}
+
+fn escape_html(input: &str) -> String {
+    let mut escaped = String::with_capacity(input.len());
+    for ch in input.chars() {
+        match ch {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            '"' => escaped.push_str("&quot;"),
+            '\'' => escaped.push_str("&#39;"),
+            _ => escaped.push(ch),
+        }
+    }
+    escaped
+}
+
 fn render_table(table: &TableArtifact) -> String {
     let mut display = Table::new();
     display.load_preset(ASCII_FULL);
@@ -1583,6 +2049,7 @@ struct PortBuilder {
 mod tests {
     use super::*;
     use std::collections::HashMap;
+    use std::fs;
 
     #[test]
     fn resolves_secret_placeholders_and_masks_messages() {
@@ -1665,5 +2132,141 @@ let captured = "${secret:token.value}"
         let message = variable_step.message.as_deref().unwrap_or_default();
         assert!(message.contains("***"));
         assert!(!message.contains("override-secret"));
+    }
+
+    #[test]
+    fn html_report_produces_file() {
+        let source = r#"
+asset_group corp {
+  scope demo
+}
+
+report summary using html {
+  include asset_group:corp
+}
+"#;
+
+        let scenario = crate::scenario::parse_scenario(source).expect("failed to parse scenario");
+        let executor = Executor::new();
+        let overrides = HashMap::new();
+        let secret_overrides = HashMap::new();
+
+        let outcome = executor.execute_with_vars(&scenario, &overrides, &secret_overrides);
+
+        let report_step = outcome
+            .report
+            .steps
+            .iter()
+            .find(|step| step.name == "summary")
+            .expect("report step present");
+        assert_eq!(report_step.status, ExecutionStatus::Completed);
+
+        let artifact = outcome
+            .artifacts
+            .iter()
+            .find(|artifact| artifact.name == "report:summary")
+            .expect("report artifact present");
+        let path = artifact.path.as_ref().expect("html path present");
+        assert!(
+            path.ends_with(".html"),
+            "expected html extension, got {:?}",
+            path
+        );
+
+        let contents =
+            fs::read_to_string(path).expect("html file should be readable for verification");
+        assert!(contents.contains("Axion Report"));
+        assert!(contents.contains("asset_group:corp"));
+    }
+
+    #[test]
+    fn markdown_report_produces_file() {
+        let source = r#"
+asset_group corp {
+  scope demo
+}
+
+report summary_md using markdown {
+  include asset_group:corp
+}
+"#;
+
+        let scenario = crate::scenario::parse_scenario(source).expect("failed to parse scenario");
+        let executor = Executor::new();
+        let overrides = HashMap::new();
+        let secret_overrides = HashMap::new();
+
+        let outcome = executor.execute_with_vars(&scenario, &overrides, &secret_overrides);
+
+        let report_step = outcome
+            .report
+            .steps
+            .iter()
+            .find(|step| step.name == "summary_md")
+            .expect("markdown report step present");
+        assert_eq!(report_step.status, ExecutionStatus::Completed);
+
+        let artifact = outcome
+            .artifacts
+            .iter()
+            .find(|artifact| artifact.name == "report:summary_md")
+            .expect("markdown report artifact present");
+        let path = artifact.path.as_ref().expect("markdown path present");
+        assert!(
+            path.ends_with(".md"),
+            "expected markdown extension, got {:?}",
+            path
+        );
+
+        let contents =
+            fs::read_to_string(path).expect("markdown file should be readable for verification");
+        assert!(contents.contains("Axion Report"));
+        assert!(contents.contains("asset_group:corp"));
+    }
+
+    #[test]
+    fn sarif_report_produces_file() {
+        let source = r#"
+asset_group corp {
+  scope demo
+}
+
+report summary_sarif using sarif {
+  include asset_group:corp
+  option tool_name "Axion Test Suite"
+}
+"#;
+
+        let scenario = crate::scenario::parse_scenario(source).expect("failed to parse scenario");
+        let executor = Executor::new();
+        let overrides = HashMap::new();
+        let secret_overrides = HashMap::new();
+
+        let outcome = executor.execute_with_vars(&scenario, &overrides, &secret_overrides);
+
+        let report_step = outcome
+            .report
+            .steps
+            .iter()
+            .find(|step| step.name == "summary_sarif")
+            .expect("sarif report step present");
+        assert_eq!(report_step.status, ExecutionStatus::Completed);
+
+        let artifact = outcome
+            .artifacts
+            .iter()
+            .find(|artifact| artifact.name == "report:summary_sarif")
+            .expect("sarif report artifact present");
+        let path = artifact.path.as_ref().expect("sarif path present");
+        assert!(
+            path.ends_with(".sarif"),
+            "expected sarif extension, got {:?}",
+            path
+        );
+
+        let contents =
+            fs::read_to_string(path).expect("sarif file should be readable for verification");
+        assert!(contents.contains("\"version\": \"2.1.0\""));
+        assert!(contents.contains("Axion Test Suite"));
     }
 }

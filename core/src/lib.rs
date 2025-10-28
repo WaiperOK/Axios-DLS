@@ -12,8 +12,8 @@ pub use runtime::{
 };
 pub use scenario::{
     parse_literal_expression, parse_scenario, AssetGroupStep, AssetGroupSummary, ImportStep,
-    LiteralValue, ParseError, ReportStep, ReportSummary, ScanStep, ScanSummary, Scenario,
-    ScenarioSummary, ScriptStep, ScriptSummary, Step, VariableDecl, VariableSummary,
+    LiteralValue, ParseError, ReportFormat, ReportStep, ReportSummary, ScanStep, ScanSummary,
+    Scenario, ScenarioSummary, ScriptStep, ScriptSummary, Step, VariableDecl, VariableSummary,
 };
 pub use validation::{
     builtin_tool_schema_bundle, builtin_tool_schemas, validate_scenario, Diagnostic,

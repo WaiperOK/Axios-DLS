@@ -20,22 +20,22 @@ The following tasks are ordered by priority. Each section should be completed be
 - [x] Document the SDK format for third-party tool integrations.
 
 ## 4. Secrets Management
-- [ ] Support secrets blocks (e.g., `.env`, external vaults).
-- [ ] Ensure secrets are never printed in logs/artifacts.
-- [ ] Document recommended patterns for secure execution.
+- [x] Support secrets blocks (e.g., `.env`, external vaults).
+- [x] Ensure secrets are never printed in logs/artifacts.
+- [x] Document recommended patterns for secure execution.
 
 ## 5. Reporting Backends
-- [ ] Add `report html` backend (template-based).
-- [ ] Add `report markdown` backend.
-- [ ] Add `report sarif` backend for pipeline integration.
-- [ ] Provide configuration knobs for report customisation.
+- [x] Add `report html` backend (template-based).
+- [x] Add `report markdown` backend.
+- [x] Add `report sarif` backend for pipeline integration.
+- [x] Provide configuration knobs for report customisation.
 
 ## 6. UI Enhancements (React Flow Prototype → Full Editor)
-- [ ] Node toolbar: add/remove asset/scan/report/script blocks.
-- [ ] Inline editing: double-click to edit labels and parameters.
+- [x] Node toolbar: add/remove asset/scan/report/script blocks.
+- [x] Inline editing: double-click to edit labels and parameters.
 - [ ] Edge management: delete selected edges, enforce valid connections.
 - [ ] Module awareness: visualise imports, allow module composition.
-- [ ] Export/import typed & control-flow enriched DSL.
+- [x] Export/import typed & control-flow enriched DSL.
 
 Maintain this file as the single source of truth for future development. Update status on completion of each bullet.***
 

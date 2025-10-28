@@ -1,7 +1,13 @@
 import { Edge, Node } from "reactflow";
 import { AxionNodeData, NodeKind } from "./types";
 
-const SECTION_ORDER: NodeKind[] = ["asset_group", "scan", "report"];
+const SECTION_ORDER: NodeKind[] = [
+  "imports",
+  "asset_group",
+  "scan",
+  "script",
+  "report",
+];
 
 export function exportToDsl(
   nodes: Node<AxionNodeData>[],
@@ -11,6 +17,22 @@ export function exportToDsl(
   const blocks: string[] = [];
 
   SECTION_ORDER.forEach((kind) => {
+    if (kind === "imports") {
+      const importNodes = nodes.filter((node) => node.data.kind === "import");
+      if (importNodes.length > 0) {
+        const sorted = [...importNodes].sort((a, b) =>
+          a.data.label.localeCompare(b.data.label),
+        );
+        sorted.forEach((node) => {
+          const path = (node.data.config.path || "").trim();
+          if (path) {
+            blocks.push(`import "${path}"`);
+          }
+        });
+      }
+      return;
+    }
+
     nodes
       .filter((node) => node.data.kind === kind)
       .forEach((node) => {
@@ -20,6 +42,9 @@ export function exportToDsl(
             break;
           case "scan":
             blocks.push(renderScan(node, edges, nodesById));
+            break;
+          case "script":
+            blocks.push(renderScript(node, edges, nodesById));
             break;
           case "report":
             blocks.push(renderReport(node, edges, nodesById));
@@ -101,6 +126,30 @@ function renderReport(
   return `report ${node.data.label} {\n${lines.join("\n")}\n}`;
 }
 
+function renderScript(
+  node: Node<AxionNodeData>,
+  edges: Edge[],
+  map: Map<string, Node<AxionNodeData>>,
+): string {
+  const run = node.data.config.run?.trim() || "echo \"hello\"";
+  const args = node.data.config.args?.trim();
+  const lines = [`  run "${run}"`];
+
+  if (args && args.length > 0) {
+    lines.push(`  args "${args}"`);
+  }
+
+  const inferredOutput = findDownstreamLabel(node.id, "report", edges, map);
+  const output = node.data.config.output?.trim() || inferredOutput;
+
+  let block = `script ${node.data.label} {\n${lines.join("\n")}\n}`;
+  if (output && output.length > 0) {
+    block = `${block} -> ${output}`;
+  }
+
+  return block;
+}
+
 function findUpstreamLabel(
   nodeId: string,
   kind: NodeKind,
@@ -122,4 +171,19 @@ function findUpstreamLabels(
     .filter((edge) => edge.target === nodeId)
     .map((edge) => map.get(edge.source))
     .filter((maybeNode): maybeNode is Node<AxionNodeData> => Boolean(maybeNode));
+}
+
+function findDownstreamLabel(
+  nodeId: string,
+  kind: NodeKind,
+  edges: Edge[],
+  map: Map<string, Node<AxionNodeData>>,
+): string | undefined {
+  return edges
+    .filter((edge) => edge.source === nodeId)
+    .map((edge) => map.get(edge.target))
+    .filter((maybeNode): maybeNode is Node<AxionNodeData> => Boolean(maybeNode))
+    .filter((node) => node.data.kind === kind)
+    .map((node) => node.data.label)
+    .shift();
 }

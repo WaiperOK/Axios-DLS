@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
+use std::str::FromStr;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Scenario {
@@ -54,6 +55,54 @@ pub struct ScriptStep {
 pub struct ReportStep {
     pub name: String,
     pub includes: Vec<String>,
+    pub format: ReportFormat,
+    #[serde(default)]
+    pub output: Option<String>,
+    #[serde(default)]
+    pub options: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ReportFormat {
+    Stdout,
+    Html,
+    Markdown,
+    Sarif,
+}
+
+impl ReportFormat {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ReportFormat::Stdout => "stdout",
+            ReportFormat::Html => "html",
+            ReportFormat::Markdown => "markdown",
+            ReportFormat::Sarif => "sarif",
+        }
+    }
+}
+
+impl std::str::FromStr for ReportFormat {
+    type Err = ParseError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "stdout" => Ok(ReportFormat::Stdout),
+            "html" => Ok(ReportFormat::Html),
+            "markdown" => Ok(ReportFormat::Markdown),
+            "sarif" => Ok(ReportFormat::Sarif),
+            other => Err(ParseError::InvalidSyntax(format!(
+                "unknown report format '{}'",
+                other
+            ))),
+        }
+    }
+}
+
+impl fmt::Display for ReportFormat {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -396,8 +445,10 @@ fn parse_report<'a, I>(
 where
     I: Iterator<Item = (usize, &'a str)>,
 {
-    let name = parse_report_header(first_line)?;
+    let (alias, explicit_format) = parse_report_header(first_line)?;
     let mut includes = Vec::new();
+    let mut output = None;
+    let mut options = BTreeMap::new();
 
     loop {
         let (_, raw_line) =
@@ -410,14 +461,43 @@ where
 
         if trimmed.starts_with("include ") {
             includes.push(trimmed["include ".len()..].trim().to_string());
+        } else if trimmed.starts_with("output ") {
+            if output.is_some() {
+                return Err(ParseError::InvalidSyntax(
+                    "duplicate output directive".to_string(),
+                ));
+            }
+            let value = parse_quoted(trimmed["output ".len()..].trim())?;
+            output = Some(value);
+        } else if trimmed.starts_with("option ") {
+            let remainder = trimmed["option ".len()..].trim();
+            let (key, raw_value) = parse_report_option(remainder)?;
+            if options.contains_key(key) {
+                return Err(ParseError::InvalidSyntax(format!(
+                    "duplicate option '{}'",
+                    key
+                )));
+            }
+            options.insert(key.to_string(), parse_quoted(raw_value)?);
         } else {
             return Err(ParseError::InvalidSyntax(trimmed.to_string()));
         }
     }
 
+    let format = if let Some(format) = explicit_format {
+        ReportFormat::from_str(&format)?
+    } else if let Ok(detected) = ReportFormat::from_str(&alias) {
+        detected
+    } else {
+        ReportFormat::Stdout
+    };
+
     Ok(ReportStep {
-        name: name.to_string(),
+        name: alias.to_string(),
         includes,
+        format,
+        output,
+        options,
     })
 }
 
@@ -853,13 +933,42 @@ fn parse_scan_header(line: &str) -> Result<(&str, &str), ParseError> {
     Err(ParseError::InvalidSyntax(line.to_string()))
 }
 
-fn parse_report_header(line: &str) -> Result<&str, ParseError> {
+fn parse_report_header(line: &str) -> Result<(String, Option<String>), ParseError> {
     let cleaned = line.trim_end_matches('{').trim();
     let tokens: Vec<&str> = cleaned.split_whitespace().collect();
     if tokens.len() < 2 || tokens[0] != "report" {
         return Err(ParseError::InvalidSyntax(line.to_string()));
     }
-    Ok(tokens[1])
+    if tokens.len() >= 4 && tokens[2] == "using" {
+        Ok((tokens[1].to_string(), Some(tokens[3].to_string())))
+    } else if tokens.len() == 2 {
+        Ok((tokens[1].to_string(), None))
+    } else {
+        Err(ParseError::InvalidSyntax(line.to_string()))
+    }
+}
+
+fn parse_report_option(remainder: &str) -> Result<(&str, &str), ParseError> {
+    let (key_part, value_part) = if let Some((key, value)) = remainder.split_once('=') {
+        (key.trim(), value.trim())
+    } else {
+        let mut parts = remainder.splitn(2, char::is_whitespace);
+        let key = parts
+            .next()
+            .ok_or_else(|| ParseError::InvalidSyntax(remainder.to_string()))?;
+        let value = parts
+            .next()
+            .ok_or_else(|| ParseError::InvalidSyntax(remainder.to_string()))?;
+        (key.trim(), value.trim())
+    };
+
+    if key_part.is_empty() {
+        return Err(ParseError::InvalidSyntax("missing option key".to_string()));
+    }
+    if value_part.is_empty() {
+        return Err(ParseError::MissingValue("report option value"));
+    }
+    Ok((key_part, value_part))
 }
 
 fn split_header_body(line: &str) -> Result<(&str, Option<&str>), ParseError> {
@@ -1296,6 +1405,9 @@ pub struct ScriptSummary {
 pub struct ReportSummary {
     pub name: String,
     pub includes: Vec<String>,
+    pub format: ReportFormat,
+    pub output: Option<String>,
+    pub options: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1359,6 +1471,9 @@ fn collect_summary_steps(steps: &[Step], acc: &mut SummaryAccumulator) {
             Step::Report(report) => acc.reports.push(ReportSummary {
                 name: report.name.clone(),
                 includes: report.includes.clone(),
+                format: report.format.clone(),
+                output: report.output.clone(),
+                options: report.options.clone(),
             }),
             Step::Conditional(block) => {
                 collect_summary_steps(&block.then_steps, acc);
@@ -1414,11 +1529,34 @@ impl fmt::Display for ScenarioSummary {
         if !self.reports.is_empty() {
             writeln!(f, "Reports:")?;
             for report in &self.reports {
+                let includes = if report.includes.is_empty() {
+                    "<none>".to_string()
+                } else {
+                    report.includes.join(", ")
+                };
+                let output_display = report
+                    .output
+                    .as_deref()
+                    .map(|value| format!(" -> {}", value))
+                    .unwrap_or_default();
+                let options_display = if report.options.is_empty() {
+                    String::new()
+                } else {
+                    let opts: Vec<String> = report
+                        .options
+                        .iter()
+                        .map(|(k, v)| format!("{k}={v}"))
+                        .collect();
+                    format!(" options: {}", opts.join(", "))
+                };
                 writeln!(
                     f,
-                    "  - {} (includes: {})",
+                    "  - {} [{}] (includes: {}){}{}",
                     report.name,
-                    report.includes.join(", ")
+                    report.format.as_str(),
+                    includes,
+                    output_display,
+                    options_display
                 )?;
             }
         }
@@ -1471,6 +1609,34 @@ secret db_creds from env {
                 }
             }
             other => panic!("expected secret step, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parses_report_with_format_and_output() {
+        let source = r#"
+report summary using html {
+  include asset_group:demo
+  output "reports/summary.html"
+  option title "Executive Summary"
+}
+"#;
+
+        let scenario = parse_scenario(source).expect("failed to parse report");
+        assert_eq!(scenario.steps.len(), 1);
+
+        match &scenario.steps[0] {
+            Step::Report(report) => {
+                assert_eq!(report.name, "summary");
+                assert_eq!(report.includes, vec!["asset_group:demo".to_string()]);
+                assert_eq!(report.format, ReportFormat::Html);
+                assert_eq!(report.output.as_deref(), Some("reports/summary.html"));
+                assert_eq!(
+                    report.options.get("title").map(String::as_str),
+                    Some("Executive Summary")
+                );
+            }
+            other => panic!("expected report step, got {:?}", other),
         }
     }
 }

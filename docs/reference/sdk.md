@@ -29,7 +29,19 @@ Axios SDKs enable external systems to consume artifacts, manage scenarios, and i
 
 The `axion_core::builtin_tool_schemas()` function returns these definitions (serialised with Serde) so SDK clients can hydrate them into JSON Schema or other validation frameworks.
 
-The SDK `schema` module will expose these definitions as serialisable metadata (e.g., JSON Schema) so external planners can extend or override behaviour while retaining compatibility with the CLI.
+### Secret metadata
+
+Scenarios may declare secrets via the `secret` directive (`from env`, `from file`, `from vault`). During execution the CLI and embedded runtime resolve `${secret:...}` placeholders using an in-memory `SecretStore` that automatically masks values in logs and artifacts.
+
+- Override values at runtime with `axion run scenario.ax --secret alias.field=value`. Each flag maps to the alias defined inside the `secret` block (e.g., `db_creds.username`).
+- `axion plan` performs structural checks: missing env mappings, empty file paths, or unknown providers produce diagnostics so SDK integrations can present actionable UI.
+- SDKs should surface `SecretSummary` metadata (name, provider) to editor integrations so they can prompt for secret wiring alongside tool parameter schemas.
+
+The SDK `schema` module will expose both tool schemas and secret descriptors as serialisable metadata (e.g., JSON Schema) so external planners can extend or override behaviour while retaining compatibility with the CLI.
+
+### Report outputs
+
+`ReportArtifact` now includes a `format` string and optional `output_path`. File-backed formats (`html`, `markdown`) populate `output_path` with the resolved filesystem location, while `stdout` leaves it unset. SDK consumers should respect the format to decide how to render the artifact and treat unknown formats as opaque blobs.
 
 ## Packaging Guidelines
 

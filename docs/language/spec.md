@@ -39,7 +39,10 @@ map requires 	arget); diagnostics are emitted before execution.
 
 ## Reports
 
-- Report targets are strings. The reference executor recognises `stdout`; additional targets will be introduced in backwards-compatible releases.
+- Reports accept `report <name> [using <format>] { ... }`. When `using` is omitted the executor infers the format from `<name>` (e.g., `report stdout { ... }`).
+- Supported formats: `stdout` (JSON emitted to console), `html` (static file under `artifacts/reports/<name>.html`), `markdown` (portable notes in Markdown), and `sarif` (SARIF v2.1.0 for findings exchange).
+- Inside the block, each `include <artifact>` attaches an existing artifact. Optional `output "<path>"` overrides the default file location for file-based formats.
+- `option <key> "<value>"` customises rendering. Recognised keys: `title` (HTML/Markdown heading), `tool_name`/`tool_version`/`tool_uri` (SARIF metadata), and `severity_threshold` (minimum severity included in SARIF output). Unrecognised keys are preserved in the emitted artifact for downstream consumers.
 - Reports fail when includes reference missing artifacts. This behaviour is deliberate to expose broken pipelines.
 
 ## Evolution Policy

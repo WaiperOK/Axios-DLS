@@ -11,6 +11,7 @@
   flex: 1 1 65%;
   min-width: 60%;
   border-right: 1px solid #2f3549;
+  position: relative;
 }
 
 .sidebar {
@@ -73,6 +74,14 @@ textarea {
   font-size: 0.85rem;
 }
 
+.canvas button {
+  position: relative;
+}
+
+.sidebar textarea.dsl-input {
+  min-height: 10rem;
+}
+
 button {
   align-self: flex-start;
   padding: 0.6rem 1.25rem;
@@ -88,6 +97,11 @@ button:hover {
   opacity: 0.85;
 }
 
+button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 .feedback {
   margin: 0;
   font-size: 0.85rem;
@@ -98,4 +112,351 @@ button:hover {
   margin: 0;
   font-size: 0.8rem;
   color: #7f89a8;
+}
+
+.node-toolbar {
+  position: absolute;
+  top: 1rem;
+  left: 1rem;
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.75rem 1rem;
+  background-color: rgba(15, 19, 32, 0.92);
+  border: 1px solid #2f3549;
+  border-radius: 0.75rem;
+  backdrop-filter: blur(10px);
+  box-shadow: 0 12px 24px rgba(11, 14, 22, 0.45);
+}
+
+.toolbar-label {
+  text-transform: uppercase;
+  font-size: 0.75rem;
+  letter-spacing: 0.08em;
+  color: #a7adcf;
+}
+
+.toolbar-buttons {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.node-toolbar button {
+  align-self: center;
+}
+
+.toolbar-buttons button {
+  padding: 0.45rem 0.9rem;
+  font-size: 0.8rem;
+}
+
+.toolbar-remove {
+  padding: 0.45rem 0.9rem;
+  font-size: 0.8rem;
+  background: #ef4444;
+  color: #f5f6fa;
+}
+
+.toolbar-remove:disabled {
+  opacity: 0.35;
+}
+
+.toolbar-run {
+  padding: 0.45rem 0.9rem;
+  font-size: 0.8rem;
+  background: #22c55e;
+  color: #062c14;
+}
+
+.toolbar-run:hover {
+  opacity: 0.9;
+}
+
+.node-card {
+  background: linear-gradient(160deg, rgba(23, 33, 58, 0.95), rgba(14, 19, 32, 0.95));
+  border: 1px solid rgba(63, 140, 255, 0.15);
+  border-radius: 16px;
+  padding: 14px 16px;
+  color: #f5f6fa;
+  min-width: 180px;
+  box-shadow: 0 18px 32px rgba(11, 14, 22, 0.35);
+  transition: border-color 0.18s ease, box-shadow 0.18s ease;
+}
+
+.node-card.is-selected {
+  border-color: rgba(102, 204, 255, 0.75);
+  box-shadow: 0 0 0 3px rgba(63, 140, 255, 0.35),
+    0 22px 40px rgba(11, 14, 22, 0.45);
+}
+
+.node-card.has-warning {
+  border-color: rgba(250, 204, 21, 0.8);
+  box-shadow: 0 0 0 3px rgba(250, 204, 21, 0.25);
+}
+
+.node-summary {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.node-label {
+  font-size: 1.05rem;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+
+.node-kind {
+  font-size: 0.75rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #8fa3d9;
+}
+
+.node-pills {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.node-pills li {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.25rem 0.5rem;
+  background: rgba(63, 140, 255, 0.08);
+  border: 1px solid rgba(63, 140, 255, 0.18);
+  border-radius: 10px;
+  font-size: 0.78rem;
+}
+
+.node-pills li span {
+  text-transform: uppercase;
+  color: #92a4d8;
+  letter-spacing: 0.06em;
+  font-size: 0.72rem;
+}
+
+.node-pills li code {
+  font-family: "Fira Code", "Cascadia Code", Consolas, monospace;
+  color: #f8fafc;
+  background: transparent;
+}
+
+.node-hint {
+  margin: 0;
+  font-size: 0.7rem;
+  color: rgba(146, 164, 216, 0.75);
+}
+
+.node-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.node-editor-row {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  font-size: 0.85rem;
+}
+
+.node-editor-row span {
+  color: #9aa8d8;
+  text-transform: uppercase;
+  font-size: 0.7rem;
+  letter-spacing: 0.06em;
+}
+
+.node-editor-row input {
+  padding: 0.45rem 0.55rem;
+  border-radius: 0.45rem;
+  border: 1px solid rgba(63, 140, 255, 0.28);
+  background-color: rgba(12, 18, 34, 0.95);
+  color: #f5f6fa;
+}
+
+.node-editor-row input:focus {
+  outline: 2px solid rgba(63, 140, 255, 0.45);
+}
+
+.field-warning {
+  font-size: 0.7rem;
+  color: #facc15;
+}
+
+.node-editor-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.6rem;
+}
+
+.node-editor-actions button {
+  padding: 0.45rem 0.9rem;
+  font-size: 0.78rem;
+}
+
+.node-editor-actions button:last-child {
+  background: rgba(248, 113, 113, 0.25);
+  color: #fca5a5;
+}
+
+.editor-warning {
+  margin: 0;
+  font-size: 0.75rem;
+  color: #facc15;
+}
+
+.handle {
+  width: 12px;
+  height: 12px;
+  border-radius: 4px;
+  border: 2px solid #0f172a;
+  background: #3f8cff;
+  transition: transform 0.12s ease;
+}
+
+.handle:hover {
+  transform: scale(1.15);
+}
+
+.handle.target {
+  background: #38bdf8;
+}
+
+.log-panel {
+  margin-top: 1.25rem;
+  padding: 1rem;
+  background: rgba(15, 19, 32, 0.95);
+  border: 1px solid rgba(63, 140, 255, 0.18);
+  border-radius: 12px;
+}
+
+.log-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 0.6rem;
+}
+
+.log-header h3 {
+  margin: 0;
+  font-size: 0.9rem;
+  letter-spacing: 0.04em;
+}
+
+.log-panel ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  font-size: 0.78rem;
+  color: #cbd5f5;
+}
+
+.log-panel li {
+  padding: 0.35rem 0.45rem;
+  background: rgba(63, 140, 255, 0.08);
+  border-radius: 6px;
+  border: 1px solid rgba(63, 140, 255, 0.12);
+  font-family: "Fira Code", "Cascadia Code", Consolas, monospace;
+}
+
+.log-panel button {
+  padding: 0.35rem 0.7rem;
+  font-size: 0.75rem;
+}
+
+.log-placeholder {
+  margin: 0;
+  font-size: 0.75rem;
+  color: #7f89a8;
+  font-style: italic;
+}
+.toolbar-actions {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.toolbar-actions button {
+  padding: 0.45rem 0.9rem;
+  font-size: 0.8rem;
+}
+
+.log-controls {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.log-controls select {
+  background: rgba(15, 19, 32, 0.9);
+  color: #f5f6fa;
+  border: 1px solid rgba(63, 140, 255, 0.25);
+  border-radius: 0.4rem;
+  padding: 0.35rem 0.5rem;
+}
+
+.log-entry {
+  display: grid;
+  grid-template-columns: auto auto 1fr;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.log-entry .log-time {
+  font-family: "Fira Code", "Cascadia Code", Consolas, monospace;
+  color: rgba(148, 163, 184, 0.9);
+  font-size: 0.7rem;
+}
+
+.log-entry .log-level {
+  font-size: 0.7rem;
+  letter-spacing: 0.08em;
+}
+
+.log-entry.log-info .log-level {
+  color: #38bdf8;
+}
+
+.log-entry.log-warn .log-level {
+  color: #facc15;
+}
+
+.log-entry.log-error .log-level {
+  color: #f87171;
+}
+
+.log-entry .log-text {
+  font-size: 0.8rem;
+}
+
+.cli-panel {
+  margin-top: 1.25rem;
+  padding: 1rem;
+  background: rgba(15, 19, 32, 0.95);
+  border: 1px solid rgba(63, 140, 255, 0.18);
+  border-radius: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.cli-panel textarea {
+  resize: vertical;
+  min-height: 4rem;
+}
+
+.cli-panel button {
+  align-self: flex-start;
+  padding: 0.45rem 0.9rem;
+  font-size: 0.8rem;
 }

@@ -1,4 +1,9 @@
-export type NodeKind = "asset_group" | "scan" | "report";
+export type NodeKind =
+  | "import"
+  | "asset_group"
+  | "scan"
+  | "script"
+  | "report";
 
 export interface AxionNodeData {
   label: string;

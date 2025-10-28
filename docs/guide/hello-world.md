@@ -39,6 +39,33 @@ EOF
 5. **Scan** (`scan banner nmap`) - Invokes `nmap -sn 192.0.2.10`. The closing `-> banner_scan` alias renames the resulting artifact.
 6. **Report** - Emits a JSON payload (and optional ASCII table) to standard output that includes `banner_scan`.
 
+### Adding Secrets
+
+Sensitive inputs such as credentials or API tokens are declared with `secret` blocks. Values populate a runtime-only secret store and can be interpolated inside strings with `${secret:...}` placeholders.
+
+```axion
+secret http_creds from env {
+  username = "HELLO_WORLD_USER"
+  password = "HELLO_WORLD_PASS"
+}
+
+let auth_header = "Basic ${secret:http_creds.username}:${secret:http_creds.password}"
+```
+
+- `from env` maps friendly aliases (`username`, `password`) to environment variables.
+- `from file "path/to/secret"` loads the file contents into the secret store.
+- Any message that includes the resolved secret is automatically masked in the execution report.
+
+At runtime you may override values without touching local env/files:
+
+```
+cargo run -p axion-cli -- run hello-world.ax \
+  --secret http_creds.username=admin \
+  --secret http_creds.password="$(pass show hello-world)"
+```
+
+Use `--secret` for secret substitutions, and `--var` for plain variables. Both flags accept multiple entries.
+
 ## Execution
 
 ```
@@ -54,6 +81,8 @@ The optional `--var KEY=VALUE` flag overrides any `let` declaration at runtime; 
 
 - Modify the scan flags to collect service banners (`-sV`) and compare artifacts.
 - Add a `script` directive that parses the scan artifact and classifies exposed services.
+- Duplicate the report block as `report html_summary using html { ... }` to render a static HTML summary under `artifacts/reports/`.
+- Emit complementary notes with `report notebook using markdown { ... }` to capture findings in a shareable `.md` file.
 - Introduce additional reports (e.g., `report sarif`) once new backends are implemented.
 - Wrap sections in `if` conditions or use `for target in [...]` loops to fan out scans across multiple hosts.
 

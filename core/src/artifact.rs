@@ -56,9 +56,14 @@ pub struct AssetGroupArtifact {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReportArtifact {
     pub target: String,
+    pub format: String,
     pub generated_at: String,
     pub includes: BTreeMap<String, Value>,
     pub tables: BTreeMap<String, TableArtifact>,
+    #[serde(default)]
+    pub output_path: Option<String>,
+    #[serde(default)]
+    pub options: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
