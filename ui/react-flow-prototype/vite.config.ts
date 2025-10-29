@@ -113,17 +113,22 @@ async function resolveExecutable(): Promise<AxionCommand> {
   if (executableCache.entry) {
     return executableCache.entry;
   }
-  const binaryName = process.platform === "win32" ? "axion-cli.exe" : "axion-cli";
-  const binaryPath = resolve(workspaceRoot, "target", "debug", binaryName);
-  try {
-    await access(binaryPath);
-    executableCache.entry = { command: binaryPath, args: [] };
-  } catch {
+  const preferBinary = process.env.AXION_USE_BINARY === "1";
+  if (preferBinary) {
+    const binaryName = process.platform === "win32" ? "axion-cli.exe" : "axion-cli";
+    const binaryPath = resolve(workspaceRoot, "target", "debug", binaryName);
+    try {
+      await access(binaryPath);
+      executableCache.entry = { command: binaryPath, args: [] };
+      return executableCache.entry;
+    } catch {
+      // fall through to cargo
+    }
+  }
     executableCache.entry = {
       command: "cargo",
       args: ["run", "-p", "axion-cli", "--"],
     };
-  }
   return executableCache.entry;
 }
 
@@ -237,10 +242,20 @@ function createApiHandler(): Middleware {
             ...varsArgs,
             ...secretArgs,
           ]);
+          let parsed: unknown = null;
+          const raw = stdout.trim();
+          if (raw.startsWith("{")) {
+            try {
+              parsed = JSON.parse(raw);
+            } catch (error) {
+              console.warn("[axion-api] failed to parse JSON run output", error);
+            }
+          }
           respondJson(res, {
             stdout: sanitizeLines(stdout),
             stderr: sanitizeLines(stderr),
             exitCode,
+            result: parsed,
           });
         } finally {
           await rm(scenarioPath, { force: true });
@@ -258,10 +273,20 @@ function createApiHandler(): Middleware {
           throw new HttpError(400, "CLI command is empty");
         }
         const { stdout, stderr, exitCode } = await runAxion(args);
+        let parsed: unknown = null;
+        const raw = stdout.trim();
+        if (raw.startsWith("{")) {
+          try {
+            parsed = JSON.parse(raw);
+          } catch (error) {
+            console.warn("[axion-api] failed to parse JSON cli output", error);
+          }
+        }
         respondJson(res, {
           stdout: sanitizeLines(stdout),
           stderr: sanitizeLines(stderr),
           exitCode,
+          result: parsed,
         });
         return;
       }

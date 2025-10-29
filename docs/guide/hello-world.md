@@ -104,4 +104,8 @@ python tools/axion_repl.py
 
 Use `:help` to list commands; buffers accept the same syntax demonstrated above.
 
+## Visual editor prototype
+
+Prefer to sketch scenarios visually? Launch `npm run dev -- --host` from `ui/react-flow-prototype` and follow the workflow described in [UI Builder](ui-builder.md) (українська версія: [UI Builder (UA)](ui-builder.uk.md)).
+
 

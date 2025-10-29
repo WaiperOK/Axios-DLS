@@ -21,6 +21,7 @@ import ReactFlow, {
   Handle,
   MiniMap,
   Position,
+  type ReactFlowInstance,
 } from "reactflow";
 import dagre from "dagre";
 import "reactflow/dist/style.css";
@@ -124,6 +125,18 @@ interface LogEntry {
   message: string;
   timestamp: string;
 }
+
+const PROFILE_KEY = "axion-profile";
+const SETTINGS_KEY = "axion-settings";
+
+const DEFAULT_PREFERENCES = {
+  autoLayoutOnImport: false,
+  autoRunOnPreset: false,
+  rememberLastScenario: true,
+  cliCommand: "cargo run -p axion-cli --",
+  defaultPort: "9001",
+  showHotkeys: true,
+} as const;
 
 function cloneGraphState(
   nodes: Node<AxionNodeData>[],
@@ -539,6 +552,16 @@ export default function App() {
   const [logFilter, setLogFilter] = useState<"all" | LogLevel>("all");
   const [cliInput, setCliInput] = useState("");
   const [isRunning, setIsRunning] = useState(false);
+  const [profile, setProfile] = useState(() => ({
+    displayName: "",
+    email: "",
+  }));
+  const [preferences, setPreferences] = useState(() => ({
+    ...DEFAULT_PREFERENCES,
+  }));
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [isLogCenterOpen, setIsLogCenterOpen] = useState(false);
+  const [logDetail, setLogDetail] = useState<LogEntry | null>(null);
   const [history, setHistory] = useState(() => [
     cloneGraphState(initialNodes, initialEdges),
   ]);
@@ -548,7 +571,52 @@ export default function App() {
   const historySnapshotRef = useRef(
     JSON.stringify({ nodes: initialNodes, edges: initialEdges }),
   );
+  const reactFlowRef = useRef<ReactFlowInstance | null>(null);
+  const [hoveredModuleId, setHoveredModuleId] = useState<string | null>(null);
   const nodeTypes = useMemo(() => ({ axion: EditableNode }), []);
+
+  useEffect(() => {
+    try {
+      const storedProfile = localStorage.getItem(PROFILE_KEY);
+      if (storedProfile) {
+        const parsed = JSON.parse(storedProfile) as Partial<typeof profile>;
+        setProfile((prev) => ({ ...prev, ...parsed }));
+      }
+    } catch (error) {
+      console.warn("[settings] failed to restore profile", error);
+    }
+    try {
+      const storedSettings = localStorage.getItem(SETTINGS_KEY);
+      if (storedSettings) {
+        const parsed = JSON.parse(storedSettings) as Partial<typeof preferences>;
+        setPreferences((prev) => ({ ...prev, ...parsed }));
+      }
+    } catch (error) {
+      console.warn("[settings] failed to restore preferences", error);
+    }
+  }, []);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(PROFILE_KEY, JSON.stringify(profile));
+    } catch (error) {
+      console.warn("[settings] failed to persist profile", error);
+    }
+  }, [profile]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(SETTINGS_KEY, JSON.stringify(preferences));
+    } catch (error) {
+      console.warn("[settings] failed to persist preferences", error);
+    }
+  }, [preferences]);
+
+  useEffect(() => {
+    if (!preferences.rememberLastScenario) {
+      localStorage.removeItem("axion-flow-dsl");
+    }
+  }, [preferences.rememberLastScenario]);
 
   const appendLog = useCallback(
     (level: LogLevel, message: string) => {
@@ -568,7 +636,57 @@ export default function App() {
     [logs, logFilter],
   );
 
+  const modules = useMemo(
+    () =>
+      nodes
+        .filter((node) => node.data.kind === "import")
+        .map((node) => {
+          const pathValue = node.data.config.path ?? "";
+          return {
+            id: node.id,
+            label: node.data.label,
+            path: pathValue,
+            isMissing: pathValue.trim().length === 0,
+          };
+        }),
+    [nodes],
+  );
+
+  const documentationLinks = useMemo(
+    () => [
+      {
+        title: "Language overview",
+        description: "Syntax reference and directive semantics",
+        href: "docs/language/overview.md",
+      },
+      {
+        title: "Hello world guide",
+        description: "Step-by-step walkthrough for the CLI",
+        href: "docs/guide/hello-world.md",
+      },
+      {
+        title: "SDK reference",
+        description: "Embedding Axion in external tooling",
+        href: "docs/reference/sdk.md",
+      },
+      {
+        title: "UI builder guide",
+        description: "How to use the React Flow prototype",
+        href: "docs/guide/ui-builder.md",
+      },
+      {
+        title: "UI builder (UA)",
+        description: "Українська версія інструкції для UI",
+        href: "docs/guide/ui-builder.uk.md",
+      },
+    ],
+    [],
+  );
+
   useEffect(() => {
+    if (!preferences.rememberLastScenario) {
+      return;
+    }
     const stored = localStorage.getItem("axion-flow-dsl");
     if (!stored) {
       return;
@@ -593,7 +711,7 @@ export default function App() {
     } else {
       appendLog("info", "Loaded scenario from local storage");
     }
-  }, [appendLog, setEdges, setNodes]);
+  }, [appendLog, preferences.rememberLastScenario, setEdges, setNodes]);
 
   const onConnect = useCallback(
     (connection: Connection) => {
@@ -836,6 +954,62 @@ export default function App() {
     URL.revokeObjectURL(url);
   }, [logs]);
 
+  const openLogDetail = useCallback(
+    (entry: LogEntry) => {
+      setLogDetail(entry);
+      setIsLogCenterOpen(true);
+    },
+    [],
+  );
+
+  const openLogCenter = useCallback(() => {
+    setLogDetail((current) => current ?? filteredLogs[0] ?? null);
+    setIsLogCenterOpen(true);
+  }, [filteredLogs]);
+
+  const closeLogCenter = useCallback(() => {
+    setIsLogCenterOpen(false);
+    setLogDetail(null);
+  }, []);
+
+  const focusModule = useCallback(
+    (moduleId: string) => {
+      setSelectedNodeId(moduleId);
+      setSelectedEdgeId(null);
+      setHoveredModuleId(null);
+      const instance = reactFlowRef.current;
+      if (!instance) {
+        return;
+      }
+      const node = instance.getNode(moduleId);
+      if (!node) {
+        return;
+      }
+      const width = node.width ?? node.measured?.width ?? 220;
+      const height = node.height ?? node.measured?.height ?? 160;
+      instance.setCenter(
+        node.position.x + width / 2,
+        node.position.y + height / 2,
+        { zoom: 1.1, duration: 400 },
+      );
+    },
+    [],
+  );
+
+  const updateProfile = useCallback(
+    (key: keyof SettingsProfile, value: string) => {
+      setProfile((current) => ({ ...current, [key]: value }));
+    },
+    [],
+  );
+
+  const updatePreference = useCallback(
+    (key: keyof SettingsPreferences, value: boolean | string) => {
+      setPreferences((current) => ({ ...current, [key]: value }));
+    },
+    [],
+  );
+
   const handleCliSubmit = useCallback(async () => {
     const command = cliInput.trim();
     if (!command) {
@@ -913,6 +1087,110 @@ export default function App() {
     appendLog("info", "Auto layout applied");
   }, [appendLog, edges, nodes, setNodes]);
 
+  const handleLoadPreset = useCallback(() => {
+    const presetNodes: Node<AxionNodeData>[] = [
+      {
+        id: "asset_preset",
+        type: "axion",
+        position: { x: -220, y: 80 },
+        data: {
+          label: "scan_target",
+          kind: "asset_group",
+          config: {
+            cidr: "scanme.nmap.org",
+            note: "Nmap public test host",
+          },
+        },
+        style: { width: 220 },
+      },
+      {
+        id: "scan_preset",
+        type: "axion",
+        position: { x: 120, y: 60 },
+        data: {
+          label: "nmap_scan",
+          kind: "scan",
+          config: {
+            tool: "nmap",
+            target: "scanme.nmap.org",
+            flags: "-sV -Pn",
+            output: "scanme_ports",
+          },
+        },
+        style: { width: 220 },
+      },
+      {
+        id: "report_preset",
+        type: "axion",
+        position: { x: 420, y: 80 },
+        data: {
+          label: "stdout",
+          kind: "report",
+          config: {
+            includes: "scanme_ports",
+          },
+        },
+        style: { width: 220 },
+      },
+    ];
+
+    const presetEdges: Edge[] = [
+      {
+        id: "edge_asset_scan",
+        source: "asset_preset",
+        target: "scan_preset",
+        animated: true,
+      },
+      {
+        id: "edge_scan_report",
+        source: "scan_preset",
+        target: "report_preset",
+        animated: true,
+      },
+    ];
+
+    skipHistoryRef.current = true;
+    setNodes(presetNodes);
+    setEdges(presetEdges);
+    setSelectedNodeId(null);
+    setSelectedEdgeId(null);
+
+    const dsl = exportToDsl(presetNodes, presetEdges);
+    setDslInput(dsl);
+    setHistory([cloneGraphState(presetNodes, presetEdges)]);
+    historyIndexRef.current = 0;
+    setHistoryIndex(0);
+    historySnapshotRef.current = JSON.stringify({
+      nodes: presetNodes,
+      edges: presetEdges,
+    });
+    if (preferences.rememberLastScenario) {
+      localStorage.setItem("axion-flow-dsl", dsl);
+    }
+    appendLog("info", "Loaded preset: nmap test scan");
+
+    if (preferences.autoLayoutOnImport) {
+      setTimeout(() => handleLayout(), 0);
+    }
+    if (preferences.autoRunOnPreset) {
+      setTimeout(() => {
+        if (!isRunning) {
+          handleRun();
+        }
+      }, 250);
+    }
+  }, [
+    appendLog,
+    handleLayout,
+    handleRun,
+    isRunning,
+    preferences.autoLayoutOnImport,
+    preferences.autoRunOnPreset,
+    preferences.rememberLastScenario,
+    setEdges,
+    setNodes,
+  ]);
+
   const applySnapshot = useCallback(
     (snapshot: { nodes: Node<AxionNodeData>[]; edges: Edge[] }) => {
       skipHistoryRef.current = true;
@@ -959,8 +1237,9 @@ export default function App() {
 
   const handleClearLogs = useCallback(() => {
     setLogs([]);
-    appendLog("info", "Logs cleared");
-  }, [appendLog]);
+    setLogDetail(null);
+    setIsLogCenterOpen(false);
+  }, []);
 
   const handleImport = useCallback(() => {
     const { nodes: parsedNodes, edges: parsedEdges, errors } =
@@ -1036,6 +1315,9 @@ export default function App() {
           onConnect={onConnect}
           defaultEdgeOptions={defaultEdgeOptions}
           fitView
+          onInit={(instance) => {
+            reactFlowRef.current = instance;
+          }}
           onNodeClick={(_, node) => {
             setSelectedNodeId(node.id);
             setSelectedEdgeId(null);
@@ -1047,6 +1329,7 @@ export default function App() {
           onPaneClick={() => {
             setSelectedNodeId(null);
             setSelectedEdgeId(null);
+            setHoveredModuleId(null);
           }}
           nodeTypes={nodeTypes}
         >
@@ -1096,6 +1379,16 @@ export default function App() {
             <button type="button" onClick={handleRedo} disabled={!canRedo}>
               Redo
             </button>
+            <button type="button" onClick={handleLoadPreset}>
+              Load test scan
+            </button>
+            <button
+              type="button"
+              className="toolbar-settings"
+              onClick={() => setIsSettingsOpen(true)}
+            >
+              Settings
+            </button>
             <button type="button" onClick={handleLayout}>
               Auto layout
             </button>
@@ -1110,6 +1403,7 @@ export default function App() {
           </div>
         </div>
       </div>
+
       <div className="sidebar">
         <h2>Scenario</h2>
         <textarea
@@ -1121,31 +1415,107 @@ export default function App() {
         <button type="button" onClick={handleImport}>
           Import DSL
         </button>
+        <div className="cli-panel cli-inline">
+          <h3>CLI</h3>
+          <textarea
+            value={cliInput}
+            onChange={(event) => setCliInput(event.target.value)}
+            rows={3}
+            placeholder="axion> run examples/hello.ax"
+            onKeyDown={(event) => {
+              if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
+                event.preventDefault();
+                handleCliSubmit();
+              }
+            }}
+          ></textarea>
+          <button type="button" onClick={handleCliSubmit}>
+            Send
+          </button>
+        </div>
         <h2>Node editor</h2>
-        {selectedNode ? (
-          <div className="form">
-            <label className="form-row">
-              <span>Label</span>
-              <input
-                value={selectedNode.data.label}
-                onChange={(event) => handleLabelChange(event.target.value)}
-              />
-            </label>
-            {fieldConfig[selectedNode.data.kind].map((field) => (
-              <label className="form-row" key={field.key}>
-                <span>{field.label}</span>
+        <div className={`form node-form${selectedNode ? " is-active" : ""}`}>
+          {selectedNode ? (
+            <>
+              <label className="form-row">
+                <span>Label</span>
                 <input
-                  placeholder={field.placeholder}
-                  value={selectedNode.data.config[field.key] || ""}
-                  onChange={(event) =>
-                    handleConfigChange(field.key, event.target.value)
-                  }
+                  value={selectedNode.data.label}
+                  onChange={(event) => handleLabelChange(event.target.value)}
                 />
               </label>
-            ))}
+              {fieldConfig[selectedNode.data.kind].map((field) => (
+                <label className="form-row" key={field.key}>
+                  <span>{field.label}</span>
+                  <input
+                    placeholder={field.placeholder}
+                    value={selectedNode.data.config[field.key] || ""}
+                    onChange={(event) =>
+                      handleConfigChange(field.key, event.target.value)
+                    }
+                  />
+                </label>
+              ))}
+            </>
+          ) : (
+            <p>Select a node to edit its properties.</p>
+          )}
+        </div>
+        {modules.length > 0 && (
+          <div className="module-panel">
+            <h3>Modules</h3>
+            <ul>
+              {modules.map((module) => {
+                const isActive =
+                  module.id === hoveredModuleId || module.id === selectedNodeId;
+                const classes = ["module-item"];
+                if (isActive) {
+                  classes.push("is-active");
+                }
+                if (module.isMissing) {
+                  classes.push("is-missing");
+                }
+                return (
+                  <li key={module.id} className={classes.join(" ")}>
+                    <button
+                      type="button"
+                      className="unstyled-button module-button"
+                      onClick={() => focusModule(module.id)}
+                      onMouseEnter={() => setHoveredModuleId(module.id)}
+                      onMouseLeave={() => setHoveredModuleId(null)}
+                    >
+                      <span className="module-label">{module.label}</span>
+                      <code className="module-path">
+                        {module.path || "(path not set)"}
+                      </code>
+                    </button>
+                  </li>
+                );
+              })}
+            </ul>
           </div>
-        ) : (
-          <p>Select a node to edit its properties.</p>
+        )}
+        {preferences.showHotkeys && (
+          <div className="hotkey-hints">
+            <h3>Shortcuts</h3>
+            <ul>
+              <li>
+                <code>Double click</code> — edit node in place
+              </li>
+              <li>
+                <code>Del</code> — delete selected node or edge
+              </li>
+              <li>
+                <code>Ctrl/Cmd + Enter</code> — send CLI command
+              </li>
+              <li>
+                <code>Right click + drag</code> — pan canvas
+              </li>
+              <li>
+                <code>Scroll</code> — zoom, <code>Shift + Scroll</code> — horizontal pan
+              </li>
+            </ul>
+          </div>
         )}
         {importErrors.length > 0 && (
           <div className="errors">
@@ -1185,6 +1555,13 @@ export default function App() {
               </select>
               <button
                 type="button"
+                onClick={openLogCenter}
+                disabled={logs.length === 0}
+              >
+                Log centre
+              </button>
+              <button
+                type="button"
                 onClick={handleDownloadLogs}
                 disabled={logs.length === 0}
               >
@@ -1210,35 +1587,393 @@ export default function App() {
                   key={`${entry.timestamp}-${index}`}
                   className={`log-entry log-${entry.level}`}
                 >
-                  <span className="log-time">
-                    {new Date(entry.timestamp).toLocaleTimeString()}
-                  </span>
-                  <span className="log-level">{entry.level.toUpperCase()}</span>
-                  <span className="log-text">{entry.message}</span>
+                  <button
+                    type="button"
+                    className="unstyled-button log-entry-button"
+                    onClick={() => openLogDetail(entry)}
+                  >
+                    <span className="log-time">
+                      {new Date(entry.timestamp).toLocaleTimeString()}
+                    </span>
+                    <span className="log-level">
+                      {entry.level.toUpperCase()}
+                    </span>
+                    <span className="log-text">{entry.message}</span>
+                  </button>
                 </li>
               ))}
             </ul>
           )}
         </div>
-        <div className="cli-panel">
-          <h3>CLI</h3>
-          <textarea
-            value={cliInput}
-            onChange={(event) => setCliInput(event.target.value)}
-            rows={3}
-            placeholder="axion> run examples/hello.ax"
-            onKeyDown={(event) => {
-              if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
-                event.preventDefault();
-                handleCliSubmit();
-              }
-            }}
-          ></textarea>
-          <button type="button" onClick={handleCliSubmit}>
-            Send
-          </button>
-        </div>
       </div>
+      {isLogCenterOpen && (
+        <div className="log-center-overlay" onClick={closeLogCenter}>
+          <div className="log-center-card" onClick={(event) => event.stopPropagation()}>
+            <header className="log-center-header">
+              <div>
+                <h3>Log centre</h3>
+                <p>Review execution output, copy diagnostics, and inspect artifacts.</p>
+              </div>
+              <div className="log-center-actions">
+                <select
+                  value={logFilter}
+                  onChange={(event) =>
+                    setLogFilter(event.target.value as "all" | LogLevel)
+                  }
+                >
+                  <option value="all">All</option>
+                  <option value="info">Info</option>
+                  <option value="warn">Warn</option>
+                  <option value="error">Error</option>
+                </select>
+                <button
+                  type="button"
+                  onClick={handleDownloadLogs}
+                  disabled={logs.length === 0}
+                >
+                  Download
+                </button>
+                <button
+                  type="button"
+                  onClick={handleClearLogs}
+                  disabled={logs.length === 0}
+                >
+                  Clear
+                </button>
+                <button type="button" onClick={closeLogCenter}>
+                  Close
+                </button>
+              </div>
+            </header>
+            <div className="log-center-body">
+              <aside className="log-center-list">
+                {filteredLogs.length === 0 ? (
+                  <p className="log-placeholder">No entries match current filter.</p>
+                ) : (
+                  <ul>
+                    {filteredLogs.map((entry, index) => {
+                      const isSelected =
+                        logDetail &&
+                        logDetail.timestamp === entry.timestamp &&
+                        logDetail.message === entry.message;
+                      const rowClasses = ["log-entry", "log-center-item", `log-${entry.level}`];
+                      if (isSelected) {
+                        rowClasses.push("is-selected");
+                      }
+                      return (
+                        <li key={`${entry.timestamp}-${index}`}>
+                          <button
+                            type="button"
+                            className={`unstyled-button log-entry-button ${rowClasses.join(" ")}`}
+                            onClick={() => setLogDetail(entry)}
+                          >
+                            <span className="log-time">
+                              {new Date(entry.timestamp).toLocaleTimeString()}
+                            </span>
+                            <span className="log-level">
+                              {entry.level.toUpperCase()}
+                            </span>
+                            <span className="log-text">{entry.message}</span>
+                          </button>
+                        </li>
+                      );
+                    })}
+                  </ul>
+                )}
+              </aside>
+              <section className="log-center-detail">
+                {logDetail ? (
+                  <>
+                    <div className={`log-detail-badge log-${logDetail.level}`}>
+                      {logDetail.level.toUpperCase()}
+                    </div>
+                    <p className="log-detail-meta">
+                      {new Date(logDetail.timestamp).toLocaleString()}
+                    </p>
+                    <LogDetailBody entry={logDetail} />
+                  </>
+                ) : (
+                  <p className="log-placeholder">Select a log entry to inspect the payload.</p>
+                )}
+              </section>
+            </div>
+          </div>
+        </div>
+      )}
+      {isSettingsOpen && (
+        <SettingsPage
+          profile={profile}
+          preferences={preferences}
+          documentationLinks={documentationLinks}
+          onClose={() => setIsSettingsOpen(false)}
+          onProfileChange={updateProfile}
+          onPreferenceChange={updatePreference}
+          onLoadPreset={handleLoadPreset}
+        />
+      )}
     </div>
   );
 }
+
+type LogDetailBodyProps = {
+  entry: LogEntry;
+};
+
+const LogDetailBody = memo(function LogDetailBody({ entry }: LogDetailBodyProps) {
+  const [copied, setCopied] = useState(false);
+
+  useEffect(() => {
+    setCopied(false);
+  }, [entry.timestamp, entry.message]);
+
+  useEffect(() => {
+    if (!copied) {
+      return;
+    }
+    const timeout = setTimeout(() => setCopied(false), 1600);
+    return () => clearTimeout(timeout);
+  }, [copied]);
+
+  const prettified = useMemo(() => {
+    const trimmed = entry.message.trim();
+    if (!trimmed) {
+      return null;
+    }
+    const looksLikeJson =
+      (trimmed.startsWith("{") && trimmed.endsWith("}")) ||
+      (trimmed.startsWith("[") && trimmed.endsWith("]"));
+    if (!looksLikeJson) {
+      return null;
+    }
+    try {
+      const parsed = JSON.parse(trimmed);
+      return JSON.stringify(parsed, null, 2);
+    } catch {
+      return null;
+    }
+  }, [entry.message]);
+
+  const handleCopy = useCallback(async () => {
+    try {
+      if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(entry.message);
+      } else if (typeof window !== "undefined" && typeof document !== "undefined") {
+        const textarea = document.createElement("textarea");
+        textarea.value = entry.message;
+        textarea.style.position = "fixed";
+        textarea.style.opacity = "0";
+        document.body.appendChild(textarea);
+        textarea.select();
+        document.execCommand("copy");
+        document.body.removeChild(textarea);
+      }
+      setCopied(true);
+    } catch {
+      setCopied(false);
+    }
+  }, [entry.message]);
+
+  return (
+    <div className="log-detail-content">
+      <div className="log-detail-toolbar">
+        <button type="button" onClick={handleCopy}>
+          {copied ? "Copied" : "Copy message"}
+        </button>
+      </div>
+      {prettified ? (
+        <>
+          <h4 className="log-detail-title">Structured payload</h4>
+          <pre className="log-detail-pre">{prettified}</pre>
+          <details className="log-detail-raw">
+            <summary>View raw message</summary>
+            <pre>{entry.message}</pre>
+          </details>
+        </>
+      ) : (
+        <pre className="log-detail-pre">{entry.message}</pre>
+      )}
+    </div>
+  );
+});
+
+type SettingsProfile = {
+  displayName: string;
+  email: string;
+};
+
+type SettingsPreferences = typeof DEFAULT_PREFERENCES;
+
+type DocumentationLink = {
+  title: string;
+  description: string;
+  href: string;
+};
+
+type SettingsPageProps = {
+  profile: SettingsProfile;
+  preferences: SettingsPreferences;
+  documentationLinks: DocumentationLink[];
+  onClose: () => void;
+  onProfileChange: (key: keyof SettingsProfile, value: string) => void;
+  onPreferenceChange: (
+    key: keyof SettingsPreferences,
+    value: boolean | string,
+  ) => void;
+  onLoadPreset: () => void;
+};
+
+const SettingsPage = memo(function SettingsPage({
+  profile,
+  preferences,
+  documentationLinks,
+  onClose,
+  onProfileChange,
+  onPreferenceChange,
+  onLoadPreset,
+}: SettingsPageProps) {
+  return (
+    <div className="settings-overlay" onClick={onClose}>
+      <div className="settings-content" onClick={(event) => event.stopPropagation()}>
+        <header className="settings-header">
+          <div>
+            <h2>Workspace settings</h2>
+            <p>Adjust UI behaviour, CLI defaults, and browse documentation.</p>
+          </div>
+          <button type="button" className="settings-close" onClick={onClose}>
+            Close
+          </button>
+        </header>
+        <section className="settings-section">
+          <h3>Profile</h3>
+          <div className="settings-grid">
+            <label>
+              <span>Display name</span>
+              <input
+                placeholder="Display name"
+                value={profile.displayName}
+                onChange={(event) => onProfileChange("displayName", event.target.value)}
+              />
+            </label>
+            <label>
+              <span>Email</span>
+              <input
+                type="email"
+                placeholder="operator@example.com"
+                value={profile.email}
+                onChange={(event) => onProfileChange("email", event.target.value)}
+              />
+            </label>
+          </div>
+          <p className="settings-hint">
+            Profile data is stored locally and can be reused for future reporting workflows.
+          </p>
+        </section>
+        <section className="settings-section">
+          <h3>Preferences</h3>
+          <div className="settings-preferences">
+            <label className="settings-toggle">
+              <input
+                type="checkbox"
+                checked={preferences.autoLayoutOnImport}
+                onChange={(event) =>
+                  onPreferenceChange("autoLayoutOnImport", event.target.checked)
+                }
+              />
+              <div>
+                <span>Auto layout after import</span>
+                <p>Automatically arrange nodes whenever a scenario or preset loads.</p>
+              </div>
+            </label>
+            <label className="settings-toggle">
+              <input
+                type="checkbox"
+                checked={preferences.autoRunOnPreset}
+                onChange={(event) =>
+                  onPreferenceChange("autoRunOnPreset", event.target.checked)
+                }
+              />
+              <div>
+                <span>Run automatically after presets</span>
+                <p>Trigger execution as soon as a preset is inserted.</p>
+              </div>
+            </label>
+            <label className="settings-toggle">
+              <input
+                type="checkbox"
+                checked={preferences.rememberLastScenario}
+                onChange={(event) =>
+                  onPreferenceChange("rememberLastScenario", event.target.checked)
+                }
+              />
+              <div>
+                <span>Remember last scenario</span>
+                <p>Keep the latest DSL snapshot in local storage between sessions.</p>
+              </div>
+            </label>
+            <label className="settings-toggle">
+              <input
+                type="checkbox"
+                checked={preferences.showHotkeys}
+                onChange={(event) =>
+                  onPreferenceChange("showHotkeys", event.target.checked)
+                }
+              />
+              <div>
+                <span>Show hotkey hints</span>
+                <p>Display keyboard shortcuts in the editor sidebar.</p>
+              </div>
+            </label>
+            <label>
+              <span>CLI command</span>
+              <input
+                placeholder="cargo run -p axion-cli --"
+                value={preferences.cliCommand}
+                onChange={(event) =>
+                  onPreferenceChange("cliCommand", event.target.value)
+                }
+              />
+            </label>
+            <label>
+              <span>Dev server port</span>
+              <input
+                placeholder="9001"
+                value={preferences.defaultPort}
+                onChange={(event) =>
+                  onPreferenceChange("defaultPort", event.target.value)
+                }
+              />
+            </label>
+          </div>
+        </section>
+        <section className="settings-section">
+          <h3>Documentation</h3>
+          <ul className="settings-docs">
+            {documentationLinks.map((link) => (
+              <li key={link.title}>
+                <div>
+                  <span className="docs-title">{link.title}</span>
+                  <span className="docs-desc">{link.description}</span>
+                </div>
+                <code className="docs-path">{link.href}</code>
+              </li>
+            ))}
+          </ul>
+          <p className="settings-hint">
+            Open the listed Markdown files in your editor or host the <code>docs/</code> directory for live docs.
+          </p>
+        </section>
+        <section className="settings-section">
+          <h3>Quick actions</h3>
+          <div className="settings-actions">
+            <button type="button" onClick={onLoadPreset}>
+              Insert test scan preset
+            </button>
+          </div>
+        </section>
+      </div>
+    </div>
+  );
+});
+
+
+
