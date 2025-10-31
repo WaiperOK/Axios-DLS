@@ -1,0 +1,7 @@
+# Preface
+
+Axios DSL emerged from the need to capture offensive security engagements with the same rigour applied to defensive playbooks and disaster recovery procedures. Traditional penetration testing reports often describe manually orchestrated sequences of discovery, exploitation, and verification. Repeating those sequences demands a combination of scripts, notes, and tacit knowledge that is seldom portable across teams. Axios formalises the process as executable documentation: a scenario is simultaneously a human-readable plan and a machine-actionable specification.
+
+The present manual consolidates the language definition, operational semantics, and implementation guidance for the initial Axios release. It synthesises concepts from attack graph research, automated reconnaissance pipelines, and infrastructure-as-code practices. Readers are assumed to possess a working knowledge of security assessment methodologies, basic command-line tooling, and the Rust ecosystem that underpins the reference executor.
+
+Axios is intentionally minimal at this stage. The goal is not to replace the breadth of existing security tooling, but to provide a disciplined shell for composing those tools, capturing the resulting knowledge, and iterating on methodologies. Future revisions of the manual will expand the language surface, document formal verification techniques, and describe integrations with distributed orchestration systems. Contributions from practitioners are encouraged to ensure the specification remains grounded in operational reality.

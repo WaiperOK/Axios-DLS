@@ -829,6 +829,45 @@ export default function App() {
     setSelectedEdgeId(null);
   }, [selectedEdgeId, setEdges]);
 
+  useEffect(() => {
+    const handleKey = (event: globalThis.KeyboardEvent) => {
+      if (event.key !== "Delete" && event.key !== "Backspace") {
+        return;
+      }
+      const target = event.target as HTMLElement | null;
+      if (target) {
+        const tag = target.tagName;
+        if (
+          tag === "INPUT" ||
+          tag === "TEXTAREA" ||
+          target.isContentEditable
+        ) {
+          return;
+        }
+      }
+      if (isSettingsOpen || isLogCenterOpen) {
+        return;
+      }
+      if (selectedNodeId) {
+        event.preventDefault();
+        handleRemoveNode();
+      } else if (selectedEdgeId) {
+        event.preventDefault();
+        handleRemoveEdge();
+      }
+    };
+
+    window.addEventListener("keydown", handleKey);
+    return () => window.removeEventListener("keydown", handleKey);
+  }, [
+    handleRemoveEdge,
+    handleRemoveNode,
+    isLogCenterOpen,
+    isSettingsOpen,
+    selectedEdgeId,
+    selectedNodeId,
+  ]);
+
   const handleLabelChange = useCallback(
     (value: string) => {
       if (!selectedNodeId) {
@@ -1338,7 +1377,7 @@ export default function App() {
           <MiniMap pannable zoomable />
         </ReactFlow>
         <div className="node-toolbar">
-          <span className="toolbar-label">Add</span>
+          <span className="toolbar-label">Add step</span>
           <div className="toolbar-buttons">
             <button type="button" onClick={() => handleAddNode("import")}>
               Import
@@ -1363,7 +1402,7 @@ export default function App() {
               onClick={handleRemoveNode}
               disabled={!selectedNodeId}
             >
-              Remove node
+              Delete node
             </button>
             <button
               type="button"
@@ -1371,26 +1410,26 @@ export default function App() {
               onClick={handleRemoveEdge}
               disabled={!selectedEdgeId}
             >
-              Remove edge
+              Delete link
             </button>
             <button type="button" onClick={handleUndo} disabled={!canUndo}>
-              Undo
+              Undo change
             </button>
             <button type="button" onClick={handleRedo} disabled={!canRedo}>
-              Redo
+              Redo change
             </button>
             <button type="button" onClick={handleLoadPreset}>
-              Load test scan
+              Insert preset scenario
             </button>
             <button
               type="button"
               className="toolbar-settings"
               onClick={() => setIsSettingsOpen(true)}
             >
-              Settings
+              Workspace settings
             </button>
             <button type="button" onClick={handleLayout}>
-              Auto layout
+              Auto layout nodes
             </button>
             <button
               type="button"
@@ -1405,18 +1444,21 @@ export default function App() {
       </div>
 
       <div className="sidebar">
-        <h2>Scenario</h2>
+        <h2>DSL input</h2>
         <textarea
           value={dslInput}
           onChange={handleDslChange}
           rows={12}
-          placeholder="Paste Axion DSL here and click Import"
+          placeholder="Paste Axion DSL here and import it into the graph"
         ></textarea>
         <button type="button" onClick={handleImport}>
-          Import DSL
+          Import from DSL
         </button>
         <div className="cli-panel cli-inline">
-          <h3>CLI</h3>
+          <h3>CLI runner</h3>
+          <p className="cli-hint">
+            Execute Axion CLI commands without leaving the builder. Press <code>Ctrl/Cmd + Enter</code> to run the current input.
+          </p>
           <textarea
             value={cliInput}
             onChange={(event) => setCliInput(event.target.value)}
@@ -1430,10 +1472,10 @@ export default function App() {
             }}
           ></textarea>
           <button type="button" onClick={handleCliSubmit}>
-            Send
+            Run CLI command
           </button>
         </div>
-        <h2>Node editor</h2>
+        <h2>Node details</h2>
         <div className={`form node-form${selectedNode ? " is-active" : ""}`}>
           {selectedNode ? (
             <>
@@ -1458,12 +1500,15 @@ export default function App() {
               ))}
             </>
           ) : (
-            <p>Select a node to edit its properties.</p>
+            <p>Select a node on the canvas to adjust its configuration.</p>
           )}
         </div>
         {modules.length > 0 && (
           <div className="module-panel">
-            <h3>Modules</h3>
+            <h3>Imported modules</h3>
+            <p className="module-hint">
+              Click a module to focus it on the canvas or adjust the referenced file path.
+            </p>
             <ul>
               {modules.map((module) => {
                 const isActive =
@@ -1486,7 +1531,7 @@ export default function App() {
                     >
                       <span className="module-label">{module.label}</span>
                       <code className="module-path">
-                        {module.path || "(path not set)"}
+                        {module.path || "Path not set"}
                       </code>
                     </button>
                   </li>
@@ -1497,7 +1542,7 @@ export default function App() {
         )}
         {preferences.showHotkeys && (
           <div className="hotkey-hints">
-            <h3>Shortcuts</h3>
+            <h3>Keyboard shortcuts</h3>
             <ul>
               <li>
                 <code>Double click</code> — edit node in place
@@ -1527,10 +1572,10 @@ export default function App() {
             </ul>
           </div>
         )}
-        <h2>DSL Preview</h2>
+        <h2>DSL preview</h2>
         <textarea value={dslPreview} readOnly rows={18}></textarea>
         <button type="button" onClick={handleCopy}>
-          Copy DSL
+          Copy DSL to clipboard
         </button>
         {feedback && <p className="feedback">{feedback}</p>}
         <p className="hint">
@@ -1540,7 +1585,7 @@ export default function App() {
 
         <div className="log-panel">
           <div className="log-header">
-            <h3>Logs</h3>
+            <h3>Log stream</h3>
             <div className="log-controls">
               <select
                 value={logFilter}
@@ -1558,27 +1603,27 @@ export default function App() {
                 onClick={openLogCenter}
                 disabled={logs.length === 0}
               >
-                Log centre
+                Open log center
               </button>
               <button
                 type="button"
                 onClick={handleDownloadLogs}
                 disabled={logs.length === 0}
               >
-                Download
+                Download log
               </button>
               <button
                 type="button"
                 onClick={handleClearLogs}
                 disabled={logs.length === 0}
               >
-                Clear
+                Clear log
               </button>
             </div>
           </div>
           {filteredLogs.length === 0 ? (
             <p className="log-placeholder">
-              No entries yet. Click Run to simulate execution.
+              No log entries yet. Run a scenario or send a CLI command to capture output.
             </p>
           ) : (
             <ul>
@@ -1611,8 +1656,8 @@ export default function App() {
           <div className="log-center-card" onClick={(event) => event.stopPropagation()}>
             <header className="log-center-header">
               <div>
-                <h3>Log centre</h3>
-                <p>Review execution output, copy diagnostics, and inspect artifacts.</p>
+                <h3>Log center</h3>
+                <p>Review execution output, copy diagnostics, and inspect artifacts without leaving the editor.</p>
               </div>
               <div className="log-center-actions">
                 <select
@@ -1631,17 +1676,17 @@ export default function App() {
                   onClick={handleDownloadLogs}
                   disabled={logs.length === 0}
                 >
-                  Download
+                  Download log
                 </button>
                 <button
                   type="button"
                   onClick={handleClearLogs}
                   disabled={logs.length === 0}
                 >
-                  Clear
+                  Clear log
                 </button>
                 <button type="button" onClick={closeLogCenter}>
-                  Close
+                  Close panel
                 </button>
               </div>
             </header>

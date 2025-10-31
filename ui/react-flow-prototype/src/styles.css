@@ -48,6 +48,12 @@
   letter-spacing: 0.04em;
 }
 
+.module-hint {
+  margin: 0;
+  font-size: 0.78rem;
+  color: rgba(148, 163, 184, 0.8);
+}
+
 .module-panel ul {
   list-style: none;
   margin: 0;
@@ -513,6 +519,12 @@ button.unstyled-button,
 .cli-panel.cli-inline {
   margin-top: 1rem;
   margin-bottom: 1rem;
+}
+
+.cli-hint {
+  margin: 0 0 0.6rem;
+  font-size: 0.8rem;
+  color: rgba(148, 163, 184, 0.85);
 }
 .log-controls {
   display: flex;
@@ -986,3 +998,4 @@ button.unstyled-button,
   font-family: "Fira Code", "Cascadia Code", Consolas, monospace;
   font-size: 0.75rem;
 }
+

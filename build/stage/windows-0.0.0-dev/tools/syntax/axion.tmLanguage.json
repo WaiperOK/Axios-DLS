@@ -1,0 +1,84 @@
+{
+  "scopeName": "source.axion",
+  "name": "Axion DSL",
+  "patterns": [
+    { "include": "#comments" },
+    { "include": "#keywords" },
+    { "include": "#variables" },
+    { "include": "#strings" },
+    { "include": "#numbers" }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.line.number-sign.axion",
+          "match": "#.*$"
+        }
+      ]
+    },
+    "keywords": {
+      "patterns": [
+        {
+          "name": "keyword.control.axion",
+          "match": "\\b(import|let|group|asset_group|scan|script|report|include)\\b"
+        },
+        {
+          "name": "keyword.operator.arrow.axion",
+          "match": "->"
+        }
+      ]
+    },
+    "variables": {
+      "patterns": [
+        {
+          "name": "variable.other.axion",
+          "match": "\\$\\{[A-Za-z_][A-Za-z0-9_]*\\}"
+        },
+        {
+          "name": "entity.name.label.axion",
+          "match": "\\b[A-Za-z_][A-Za-z0-9_]*:(?=\\s)"
+        }
+      ]
+    },
+    "strings": {
+      "patterns": [
+        {
+          "name": "string.quoted.double.axion",
+          "begin": "\"",
+          "end": "\"",
+          "patterns": [
+            {
+              "name": "constant.character.escape.axion",
+              "match": "\\\\."
+            }
+          ]
+        },
+        {
+          "name": "string.quoted.single.axion",
+          "begin": "'",
+          "end": "'",
+          "patterns": [
+            {
+              "name": "constant.character.escape.axion",
+              "match": "\\\\."
+            }
+          ]
+        }
+      ]
+    },
+    "numbers": {
+      "patterns": [
+        {
+          "name": "constant.numeric.axion",
+          "match": "\\b\\d+(?:\\.\\d+)?\\b"
+        }
+      ]
+    }
+  },
+  "fileTypes": [
+    "ax",
+    "axion"
+  ],
+  "uuid": "4b8dc6d0-6f8f-4cb8-8f70-axion-001"
+}
