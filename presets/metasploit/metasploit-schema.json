@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Metasploit TCP Port Scan",
+  "type": "object",
+  "required": ["rhosts", "rport"],
+  "properties": {
+    "rhosts": {
+      "type": "string",
+      "title": "Target hosts",
+      "description": "Metasploit RHOSTS value. Supports single host, CIDR, or range syntax.",
+      "examples": ["192.168.1.0/24", "10.0.0.1-10.0.0.50"]
+    },
+    "rport": {
+      "type": "integer",
+      "title": "Target port",
+      "minimum": 1,
+      "maximum": 65535,
+      "default": 443
+    },
+    "threads": {
+      "type": "integer",
+      "title": "Concurrent threads",
+      "minimum": 1,
+      "maximum": 512,
+      "default": 10
+    },
+    "workspace": {
+      "type": "string",
+      "title": "Metasploit workspace",
+      "description": "Optional workspace name for organising results."
+    },
+    "username": {
+      "type": "string",
+      "title": "Username",
+      "description": "Credential username passed to the module (if supported)."
+    },
+    "password": {
+      "type": "string",
+      "title": "Password",
+      "description": "Credential password (supply through secrets for production)."
+    },
+    "payload": {
+      "type": "string",
+      "title": "Payload",
+      "description": "Optional payload identifier to run after the module completes."
+    },
+    "options": {
+      "type": "object",
+      "title": "Additional module options",
+      "additionalProperties": {
+        "type": ["string", "number", "boolean"]
+      }
+    }
+  }
+}

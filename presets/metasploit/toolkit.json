@@ -1,0 +1,32 @@
+{
+  "tool": "metasploit",
+  "version": "0.1.0",
+  "type": "scan",
+  "binary": "msfconsole",
+  "module": "auxiliary/scanner/portscan/tcp",
+  "required": [
+    "rhosts",
+    "rport"
+  ],
+  "optional": [
+    "threads",
+    "workspace",
+    "username",
+    "password",
+    "payload",
+    "options"
+  ],
+  "cli": {
+    "command": "msfconsole",
+    "args": [
+      "-q",
+      "-x",
+      "use auxiliary/scanner/portscan/tcp; set RHOSTS ${rhosts}; set RPORT ${rport}; run; exit"
+    ]
+  },
+  "schema": "metasploit-schema.json",
+  "documentation": [
+    "https://docs.metasploit.com/docs/pentesting-101/the-metasploit-database.html",
+    "https://www.offsec.com/metasploit-unleashed/msfconsole"
+  ]
+}

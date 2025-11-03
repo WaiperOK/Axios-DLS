@@ -1,0 +1,12 @@
+# Metasploit preset demonstration
+
+preset metasploit tcp_scan {
+  rhosts "10.0.0.0/24"
+  rport 443
+  threads 20
+}
+
+report stdout {
+  include tcp_scan
+}
+
